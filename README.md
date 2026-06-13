@@ -225,7 +225,7 @@ Pull requests are welcome! If you work with RISA-3D and have ideas for new tools
 
 Built by **Vibhanshu Mishra, PE** — Structural Engineer at AG&E Structural Engineers, Austin TX.
 
-Inspired by the SAP2000 MCP server project. If this helped you, feel free to connect on LinkedIn!
+Inspired by the ETABS MCP server project from a friend. If this helped you, feel free to connect on LinkedIn!
 
 ---
 
