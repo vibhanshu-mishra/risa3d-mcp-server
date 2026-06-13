@@ -181,6 +181,11 @@ Show me all the load combinations in:
 "C:\path\to\your\model.r3d"
 ```
 
+```
+Compare these two RISA-3D models and tell me what changed:
+"C:\path\to\model-v1.r3d" and "C:\path\to\model-v2.r3d"
+```
+
 ---
 
 ## 🛠️ Available Tools
@@ -192,6 +197,7 @@ Show me all the load combinations in:
 | `list_nodes` | Lists all nodes with their X, Y, Z coordinates |
 | `list_load_combinations` | Lists all load combinations defined in the model |
 | `get_file_section` | Returns the raw contents of any named section in the file (e.g. NODES, MEMBERS, MATERIAL_PROPERTIES) |
+| `compare_risa_models` | Compares two `.r3d` files and reports differences in nodes, members, section sets, and load combinations |
 
 ---
 
@@ -199,8 +205,8 @@ Show me all the load combinations in:
 
 Future tools planned:
 
+- [x] Compare two models and summarize differences
 - [ ] Detect overstressed members from results
-- [ ] Compare two models and summarize differences
 - [ ] Generate member schedule as Word or Excel
 - [ ] Modify member sizes and save updated model
 - [ ] Batch process multiple models in a folder
@@ -219,7 +225,7 @@ Pull requests are welcome! If you work with RISA-3D and have ideas for new tools
 
 Built by **Vibhanshu Mishra, PE** — Structural Engineer at AG&E Structural Engineers, Austin TX.
 
-Inspired by the ETABS MCP server project by a friend. If this helped you, feel free to connect on LinkedIn!
+Inspired by the SAP2000 MCP server project. If this helped you, feel free to connect on LinkedIn!
 
 ---
 
