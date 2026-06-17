@@ -2,58 +2,60 @@
 
 > Connect Claude AI to your RISA-3D structural models using the Model Context Protocol (MCP).
 
-Built by a structural engineer, for structural engineers. This MCP server lets you talk to your `.r3d` files in plain English, no coding required after setup.
+Built by a structural engineer, for structural engineers. This MCP server lets you talk to your `.r3d` files in plain English -- no coding required after setup.
 
 ---
 
-## 🎬 Demo
+## Demo
 
-> *"Read this model and summarize it for me"*
-> *"List all the members in this file"*
-> *"Show me all the load combinations"*
+> *"Summarize this model for a report"*
+> *"What steel grade is this model using?"*
+> *"What are the boundary conditions at the column bases?"*
+> *"Compare these two models and tell me what changed"*
 
 Once connected, just point Claude at any `.r3d` file and start asking questions.
 
 ---
 
-## 🔧 What Is This?
+## What Is This?
 
-MCP (Model Context Protocol) is an open standard that lets AI assistants like Claude connect to external tools and files. This server acts as a bridge between Claude Desktop and your RISA-3D models, Claude can read your `.r3d` files directly and answer questions about them in plain English.
+MCP (Model Context Protocol) is an open standard that lets AI assistants like Claude connect to external tools and files. This server acts as a bridge between Claude Desktop and your RISA-3D models. Claude reads your `.r3d` files directly and answers questions about them in plain English.
 
 No RISA-3D API is required. This works by reading RISA-3D's plain-text `.r3d` file format directly.
 
 ---
 
-## ✅ What You Can Do
+## What You Can Do
 
 Once connected, you can ask Claude things like:
 
-- *"Summarize this model — how many members, nodes, and load cases?"*
+- *"Summarize this model for a report -- include members, nodes, loads, boundary conditions, and materials"*
+- *"What steel grade and Fy value is assigned in this model?"*
+- *"List all the boundary conditions -- which nodes are fixed vs. pinned?"*
+- *"What section sizes are assigned to each section set?"*
 - *"List all the members and their section sizes"*
-- *"List all the nodes and their coordinates"*
-- *"Show me all the load combinations"*
-- *"Read the materials section of this file"*
+- *"Run a QC check on this model"*
 - *"Compare these two models and tell me what changed"*
-- *"What design codes is this model using?"*
+- *"Export a member schedule for all HSS members"*
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 - Windows PC with RISA-3D installed
 - [Claude Desktop](https://claude.ai/download) (free)
-- [Node.js](https://nodejs.org) (LTS version — free)
+- [Node.js](https://nodejs.org) (LTS version -- free)
 - A Claude account (Pro plan recommended)
 
 ---
 
-## 🚀 Installation
+## Installation
 
-### Step 1 — Install Node.js
+### Step 1 -- Install Node.js
 
 Download and install the **LTS version** from [nodejs.org](https://nodejs.org). Click through all the defaults.
 
-Verify it worked — open Command Prompt and run:
+Verify it worked -- open Command Prompt and run:
 ```
 node --version
 npm --version
@@ -62,7 +64,7 @@ Both should return version numbers.
 
 ---
 
-### Step 2 — Set Up the MCP Server
+### Step 2 -- Set Up the MCP Server
 
 Open Command Prompt and run these one at a time:
 
@@ -75,7 +77,7 @@ npm install @modelcontextprotocol/sdk zod
 
 ---
 
-### Step 3 — Create the Server File
+### Step 3 -- Create the Server File
 
 In Command Prompt, run:
 ```
@@ -86,7 +88,7 @@ Click **Yes** when asked to create a new file. Paste in the contents of `index.j
 
 ---
 
-### Step 4 — Update package.json
+### Step 4 -- Update package.json
 
 In Command Prompt, run:
 ```
@@ -115,7 +117,7 @@ Save and close.
 
 ---
 
-### Step 5 — Test the Server
+### Step 5 -- Test the Server
 
 In Command Prompt, run:
 ```
@@ -123,11 +125,11 @@ cd C:\risa-mcp
 node index.js
 ```
 
-If you see a blinking cursor with no errors — it's working. Press **Ctrl+C** to stop it.
+If you see a blinking cursor with no errors -- it is working. Press **Ctrl+C** to stop it.
 
 ---
 
-### Step 6 — Connect to Claude Desktop
+### Step 6 -- Connect to Claude Desktop
 
 1. Install [Claude Desktop](https://claude.ai/download) if you haven't already
 2. Press **Windows + R**, type `%APPDATA%\Claude` and press Enter
@@ -146,28 +148,43 @@ If you see a blinking cursor with no errors — it's working. Press **Ctrl+C** t
 ```
 
 5. Save the file
-6. Fully quit Claude Desktop (right-click the system tray icon → Quit)
+6. Fully quit Claude Desktop (right-click the system tray icon -> Quit)
 7. Reopen Claude Desktop
 
 ---
 
-### Step 7 — Verify It's Running
+### Step 7 -- Verify It's Running
 
 In Claude Desktop:
 1. Click the **+** button in the chat input box
 2. Click **Connectors**
 3. You should see **risa3d** listed as connected
 
-Or go to **Settings → Developer** and confirm risa3d shows as **running**.
+Or go to **Settings -> Developer** and confirm risa3d shows as **running**.
 
 ---
 
-## 💬 Example Prompts
+## Example Prompts
 
 Once connected, open a new chat in Claude Desktop and try:
 
 ```
-Using the risa3d tool, read this file and summarize it:
+Summarize this model for a report:
+"C:\path\to\your\model.r3d"
+```
+
+```
+What steel materials are defined in this model?
+"C:\path\to\your\model.r3d"
+```
+
+```
+List the boundary conditions for this model:
+"C:\path\to\your\model.r3d"
+```
+
+```
+What section sets are defined in this model?
 "C:\path\to\your\model.r3d"
 ```
 
@@ -177,18 +194,8 @@ List all the members in this RISA-3D model:
 ```
 
 ```
-Show me all the load combinations in:
-"C:\path\to\your\model.r3d"
-```
-
-```
-Compare these two RISA-3D models and tell me what changed:
-"C:\path\to\model-v1.r3d" and "C:\path\to\model-v2.r3d"
-```
-
-```
-Export a member schedule for this model:
-"C:\path\to\your\model.r3d"
+List all Wide Flange members in full detail:
+"C:\path\to\your\model.r3d" mode="full" filterType="Wide Flange"
 ```
 
 ```
@@ -197,13 +204,8 @@ Export a member schedule for Tube members only:
 ```
 
 ```
-List members in this model (summary):
-"C:\path\to\your\model.r3d"
-```
-
-```
-List all Wide Flange members in full detail:
-"C:\path\to\your\model.r3d" mode="full" filterType="Wide Flange"
+Compare these two RISA-3D models and tell me what changed:
+"C:\path\to\model-v1.r3d" and "C:\path\to\model-v2.r3d"
 ```
 
 ```
@@ -213,28 +215,36 @@ Run a QC check on this model:
 
 ---
 
-## 🛠️ Available Tools
+## Available Tools
 
 | Tool | Description |
 |---|---|
-| `read_risa_model` | Reads a `.r3d` file and returns a summary (title, node count, member count, etc.) |
+| `read_risa_model` | Reads a `.r3d` file and returns a project summary (title, node count, member count, plate count, file size) |
 | `list_members` | Returns a type breakdown summary by default (token-efficient). Use `mode="full"` for full CSV detail. Optional `filterType` (e.g. `"Tube"`, `"Wide Flange"`) to narrow results. |
 | `list_nodes` | Lists all nodes with their X, Y, Z coordinates |
 | `list_load_combinations` | Lists all load combinations defined in the model |
-| `get_file_section` | Returns the raw contents of any named section in the file (e.g. NODES, MEMBERS, MATERIAL_PROPERTIES) |
+| `get_file_section` | Returns the raw contents of any named section in the file (e.g. NODES, MEMBERS, BOUNDARY_CONDITIONS) |
 | `compare_risa_models` | Compares two `.r3d` files and reports differences in nodes, member sizes/connectivity, section sets, and load combinations |
-| `export_member_schedule` | Generates a member schedule as CSV (label, type, size, nodes, length). Optional `filterType` to export only one section type. Optional `maxRows` cap (default 200) to prevent large token output. |
-| `qc_check_risa_model` | Checks a model for duplicate nodes, duplicate member labels, missing section sizes, zero-length members, and invalid node references |
+| `export_member_schedule` | Generates a member schedule as CSV (label, type, size, nodes, length). Optional `filterType` to export one section type. Optional `maxRows` cap (default 200). |
+| `qc_check_risa_model` | Checks for duplicate nodes, duplicate member labels, missing section sizes, zero-length members, and invalid node references |
+| `get_model_materials` | Lists all HR and CF steel materials defined in the model with Grade, E, Fy, and Fu values |
+| `get_boundary_conditions` | Lists all support conditions with node labels, constraint codes (Fixed/Free/Pinned), and plain-English descriptions |
+| `get_section_sets` | Lists all named section sets and their assigned types and sizes |
+| `summarize_model_for_report` | Single-call summary combining project info, nodes, members, section sets, materials, boundary conditions, load combinations, area loads, distributed loads, and point loads -- ready to paste into a calculation package |
 
 ---
 
-## 🧩 Technical Notes on the `.r3d` Format
+## Technical Notes on the `.r3d` Format
 
-A couple of non-obvious quirks in RISA's file format that this server handles, documented here in case you're extending it:
+Several non-obvious quirks in RISA's file format that this server handles, documented here for anyone extending it:
 
-1. **Fixed-width quoted fields.** Labels, types, and section sizes are stored as quote-padded strings, e.g. `"M14                             "`. A naive whitespace split breaks these into multiple phantom tokens. This server uses a quote-aware tokenizer that treats anything inside `"..."` (including internal spaces) as a single field.
+**1. Fixed-width quoted fields.** Labels, types, and section sizes are stored as quote-padded strings, e.g. `"M14                             "`. A naive whitespace split breaks these into multiple phantom tokens. This server uses a quote-aware tokenizer that treats anything inside `"..."` (including internal spaces) as a single field.
 
-2. **Members reference nodes by position, not by label.** In `[.MEMBERS_MAIN_DATA]`, the i-node and j-node fields are **1-based indices into the order of the `[NODES]` list** — not the node's label string. For example, a member line containing `1 7` means "the 1st node listed" to "the 7th node listed," which might be `N5` and `N18`. This server resolves those indices against an ordered node array.
+**2. Members reference nodes by position, not by label.** In `[.MEMBERS_MAIN_DATA]`, the i-node and j-node fields are 1-based indices into the order of the `[NODES]` list -- not the node label strings. For example, a member line containing `1 7` means the 1st node listed to the 7th node listed, which might resolve to `N5` and `N18`. This server resolves those indices against an ordered node array.
+
+**3. Load section names.** Point/nodal loads are stored under `[NODE_LOADS]`, not `[JOINT_LOADS]`. Member distributed loads are stored under `[DIRECT_DISTRIBUTED_LOADS]`, not `[MEMBER_DISTRIBUTED_LOADS]`.
+
+**4. Load case IDs in load sections.** The load case index stored in `[NODE_LOADS]`, `[DIRECT_DISTRIBUTED_LOADS]`, and `[AREA_LOADS]` entries is an internal RISA database ID, not the sequential 1-based index from `[BASIC_LOAD_CASES]`. When no name match is found, the tool labels the load case as `LC{n}`.
 
 The member line format (after tokenizing) is:
 ```
@@ -243,34 +253,39 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
-Future tools planned:
-
+- [x] Read and summarize any `.r3d` model
+- [x] List members with type, size, and resolved node connectivity
+- [x] List nodes with coordinates
+- [x] List load combinations
+- [x] Get raw file section by name
 - [x] Compare two models and summarize differences
-- [x] Generate member schedule as CSV/Excel
-- [x] QC checker for naming conventions and model standards
-- [ ] Detect overstressed members from results
-- [ ] Modify member sizes and save updated model
-- [ ] Batch process multiple models in a folder
-- [ ] Extract project info across all models in a project folder
+- [x] Export member schedule as CSV
+- [x] QC checker for common modeling issues
+- [x] Get steel material properties (Grade, E, Fy, Fu)
+- [x] Get boundary conditions with plain-English descriptions
+- [x] Get section sets and assigned sizes
+- [x] Summarize model for report in a single call (includes loads)
+- [ ] Modify member section sizes and save updated model
+- [ ] Batch summarize all models in a project folder
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Pull requests are welcome! If you work with RISA-3D and have ideas for new tools, open an issue and let's discuss.
-
----
-
-## 👷 About
-
-Built by **Vibhanshu Mishra, PE**, Structural Engineer at AG&E Structural Engineers, Austin TX.
-
-Inspired by the ETABS MCP server project by a friend. If this helped you, feel free to connect on LinkedIn!
+Pull requests are welcome. If you work with RISA-3D and have ideas for new tools, open an issue and let's discuss.
 
 ---
 
-## 📄 License
+## About
 
-MIT License — free to use, modify, and share.
+Built by **Vibhanshu Mishra, PE** -- Structural Engineer at AG&E Structural Engineers, Austin TX.
+
+Specializing in steel and industrial structures. Building AI tools for a niche where none existed.
+
+---
+
+## License
+
+MIT License -- free to use, modify, and share.
