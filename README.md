@@ -213,6 +213,16 @@ Run a QC check on this model:
 "C:\path\to\your\model.r3d"
 ```
 
+```
+Summarize all models in this folder:
+"D:\Projects\MISC STEEL\2026\My Project\Design"
+```
+
+```
+Summarize all models in this folder whose name contains "stair":
+"D:\Projects\MISC STEEL\2026\My Project\Design"
+```
+
 ---
 
 ## Available Tools
@@ -231,6 +241,7 @@ Run a QC check on this model:
 | `get_boundary_conditions` | Lists all support conditions with node labels, constraint codes (Fixed/Free/Pinned), and plain-English descriptions |
 | `get_section_sets` | Lists all named section sets and their assigned types and sizes |
 | `summarize_model_for_report` | Single-call summary combining project info, nodes, members, section sets, materials, boundary conditions, load combinations, area loads, distributed loads, and point loads -- ready to paste into a calculation package |
+| `batch_summarize_folder` | Scans a folder for all `.r3d` files and returns a CSV summary table (file name, title, designer, node count, member count, section sets, load combos, file size, QC status). Optional `filterName` parameter to match specific file names. |
 
 ---
 
@@ -267,8 +278,8 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 - [x] Get boundary conditions with plain-English descriptions
 - [x] Get section sets and assigned sizes
 - [x] Summarize model for report in a single call (includes loads)
+- [x] Batch summarize all models in a project folder
 - [ ] Modify member section sizes and save updated model
-- [ ] Batch summarize all models in a project folder
 
 ---
 
