@@ -223,6 +223,21 @@ Summarize all models in this folder whose name contains "stair":
 "D:\Projects\MISC STEEL\2026\My Project\Design"
 ```
 
+```
+What basic load cases are defined in this model?
+"C:\path\to\your\model.r3d"
+```
+
+```
+Find all members using HSS8X8X10 in this model:
+"C:\path\to\your\model.r3d"
+```
+
+```
+What are the deflection limits set in this model?
+"C:\path\to\your\model.r3d"
+```
+
 ---
 
 ## Available Tools
@@ -242,6 +257,9 @@ Summarize all models in this folder whose name contains "stair":
 | `get_section_sets` | Lists all named section sets and their assigned types and sizes |
 | `summarize_model_for_report` | Single-call summary combining project info, nodes, members, section sets, materials, boundary conditions, load combinations, area loads, distributed loads, and point loads -- ready to paste into a calculation package |
 | `batch_summarize_folder` | Scans a folder for all `.r3d` files and returns a CSV summary table (file name, title, designer, node count, member count, section sets, load combos, file size, QC status). Optional `filterName` parameter to match specific file names. |
+| `get_load_cases` | Lists all basic load cases defined in the model with their index, name, and load type (Gravity, Seismic, Wind, etc.) |
+| `find_members_by_section` | Returns all members assigned a specific section size. Accepts partial, case-insensitive matches (e.g. `"hss8"` matches `"HSS8X8X10"`). If no match, lists all sizes in the model. |
+| `get_deflection_limits` | Returns the deflection limit ratios (L/240, L/360, etc.) defined in both the global deflection rules and member deflection rules. Shows "Not checked" for any category set to -1. |
 
 ---
 
@@ -279,6 +297,9 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 - [x] Get section sets and assigned sizes
 - [x] Summarize model for report in a single call (includes loads)
 - [x] Batch summarize all models in a project folder
+- [x] Get basic load cases with load type classification
+- [x] Find all members using a specific section size
+- [x] Get deflection limit rules (global and per-member)
 - [ ] Modify member section sizes and save updated model
 
 ---
