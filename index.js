@@ -1150,5 +1150,320 @@ server.tool(
   }
 );
 
+
+// Helper: pad a string to exactly 32 chars for RISA's fixed-width quoted fields
+function padRISA(str, width = 32) {
+  if (str.length >= width) return str.slice(0, width);
+  return str + " ".repeat(width - str.length);
+}
+
+// Helper: replace a quoted 32-char field value in a line
+// Replaces "oldVal<padding>" with "newVal<padding>" -- exact width preserved
+function replaceQuotedField(line, oldVal, newVal) {
+  const oldPadded = `"${padRISA(oldVal)}"`;
+  const newPadded = `"${padRISA(newVal)}"`;
+  return line.split(oldPadded).join(newPadded);
+}
+
+// Tool 17: modify_section_set
+// Changes a section size in a RISA-3D model and saves as a NEW file.
+// Mode "set" changes the section set definition (affects all members using that set).
+// Mode "member" changes a specific member's size directly.
+// Mode "both" does both.
+// NEVER overwrites the original file.
+server.tool(
+  "modify_section_set",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file to save (must be different from source)"),
+    oldSize: z.string().describe("Current section size to replace e.g. HSS8X8X10"),
+    newSize: z.string().describe("New section size e.g. HSS8X8X5"),
+    mode: z.enum(["set", "member", "both"]).default("both")
+      .describe("set = change section set definition only; member = change member assignments only; both = change both"),
+    setName: z.string().optional()
+      .describe("Optional: only change the section set with this exact name. If omitted, changes all sets using oldSize."),
+    memberLabel: z.string().optional()
+      .describe("Optional: only change the member with this exact label (e.g. M4). If omitted, changes all members using oldSize.")
+  },
+  async ({ filePath, outputPath, oldSize, newSize, mode, setName, memberLabel }) => {
+    try {
+      // Safety check -- never overwrite the original
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+      const report = [];
+      let setsChanged = 0;
+      let membersChanged = 0;
+
+      // --- SECTION SETS ---
+      if (mode === "set" || mode === "both") {
+        const setsMatch = fileContent.match(/(\[\.HR_STEEL_SECTION_SETS\] <\d+>)([\s\S]*?)(\[\.END_HR_STEEL_SECTION_SETS\])/);
+        if (setsMatch) {
+          const setsBlock = setsMatch[2];
+          const newSetsBlock = setsBlock.split("\n").map(line => {
+            if (!line.trim()) return line;
+            const t = tokenize(line);
+            if (!t || t.length < 3) return line;
+            const thisSetName = clean(t[0]);
+            const thisSize = clean(t[2]);
+            // Apply filter if setName specified
+            if (setName && thisSetName !== setName) return line;
+            if (thisSize === oldSize) {
+              setsChanged++;
+              return replaceQuotedField(line, oldSize, newSize);
+            }
+            return line;
+          }).join("\n");
+          fileContent = fileContent.replace(setsMatch[2], newSetsBlock);
+          report.push(`Section sets changed: ${setsChanged}`);
+        } else {
+          report.push("No HR_STEEL_SECTION_SETS section found.");
+        }
+      }
+
+      // --- MEMBERS ---
+      if (mode === "member" || mode === "both") {
+        const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <\d+>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+        if (membersMatch) {
+          const membersBlock = membersMatch[2];
+          const newMembersBlock = membersBlock.split("\n").map(line => {
+            if (!line.trim()) return line;
+            const t = tokenize(line);
+            if (!t || t.length < 3) return line;
+            const thisLabel = clean(t[0]);
+            const thisSize = clean(t[2]);
+            // Apply filter if memberLabel specified
+            if (memberLabel && thisLabel !== memberLabel) return line;
+            if (thisSize === oldSize) {
+              membersChanged++;
+              return replaceQuotedField(line, oldSize, newSize);
+            }
+            return line;
+          }).join("\n");
+          fileContent = fileContent.replace(membersMatch[2], newMembersBlock);
+          report.push(`Members changed: ${membersChanged}`);
+        } else {
+          report.push("No MEMBERS_MAIN_DATA section found.");
+        }
+      }
+
+      if (setsChanged === 0 && membersChanged === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No matches found for section size "${oldSize}". No file was saved.\nCheck the size string matches exactly what's in the model (use get_section_sets or find_members_by_section to confirm).`
+          }]
+        };
+      }
+
+      // Write new file
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+      report.unshift(`Modified model saved to: ${outputPath}`);
+      report.push(`Original unchanged: ${filePath}`);
+      report.push(`Change: "${oldSize}" -> "${newSize}"`);
+
+      return { content: [{ type: "text", text: report.join("\n") }] };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 18: clone_model_with_changes
+// Saves a copy of a .r3d model with one or more changes applied.
+// Supported changes: section sizes, boundary conditions, load magnitudes.
+// NEVER overwrites the original file.
+server.tool(
+  "clone_model_with_changes",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file (must be different from source)"),
+    changes: z.object({
+      sectionSizes: z.array(z.object({
+        oldSize: z.string().describe("Current size e.g. HSS8X8X10"),
+        newSize: z.string().describe("Replacement size e.g. HSS8X8X5"),
+        scope: z.enum(["set", "member", "both"]).default("both"),
+        filterName: z.string().optional().describe("Optional set name or member label to limit the change")
+      })).optional().describe("Section size changes to apply"),
+
+      boundaryConditions: z.array(z.object({
+        nodeLabel: z.string().describe("Node label e.g. N5"),
+        x: z.enum(["Fixed", "Free"]).optional(),
+        y: z.enum(["Fixed", "Free"]).optional(),
+        z: z.enum(["Fixed", "Free"]).optional(),
+        rotX: z.enum(["Fixed", "Free"]).optional(),
+        rotY: z.enum(["Fixed", "Free"]).optional(),
+        rotZ: z.enum(["Fixed", "Free"]).optional()
+      })).optional().describe("Boundary condition changes -- only specified DOFs are changed, others preserved"),
+
+      loadMagnitudes: z.array(z.object({
+        memberLabel: z.string().describe("Member label e.g. M41"),
+        loadCaseName: z.string().describe("Load case name e.g. DL, LL, ELx"),
+        newStartMag: z.number().describe("New start magnitude (k/ft, negative = downward)"),
+        newEndMag: z.number().optional().describe("New end magnitude -- defaults to same as newStartMag")
+      })).optional().describe("Member distributed load magnitude changes")
+    }).describe("Changes to apply to the cloned model")
+  },
+  async ({ filePath, outputPath, changes }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+      const report = [];
+
+      // --- SECTION SIZE CHANGES ---
+      if (changes.sectionSizes && changes.sectionSizes.length > 0) {
+        for (const sc of changes.sectionSizes) {
+          let setsChanged = 0;
+          let membersChanged = 0;
+
+          if (sc.scope === "set" || sc.scope === "both") {
+            const setsMatch = fileContent.match(/(\[\.HR_STEEL_SECTION_SETS\] <\d+>)([\s\S]*?)(\[\.END_HR_STEEL_SECTION_SETS\])/);
+            if (setsMatch) {
+              const newBlock = setsMatch[2].split("\n").map(line => {
+                if (!line.trim()) return line;
+                const t = tokenize(line);
+                if (!t || t.length < 3) return line;
+                if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
+                if (clean(t[2]) === sc.oldSize) { setsChanged++; return replaceQuotedField(line, sc.oldSize, sc.newSize); }
+                return line;
+              }).join("\n");
+              fileContent = fileContent.replace(setsMatch[2], newBlock);
+            }
+          }
+
+          if (sc.scope === "member" || sc.scope === "both") {
+            const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <\d+>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+            if (membersMatch) {
+              const newBlock = membersMatch[2].split("\n").map(line => {
+                if (!line.trim()) return line;
+                const t = tokenize(line);
+                if (!t || t.length < 3) return line;
+                if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
+                if (clean(t[2]) === sc.oldSize) { membersChanged++; return replaceQuotedField(line, sc.oldSize, sc.newSize); }
+                return line;
+              }).join("\n");
+              fileContent = fileContent.replace(membersMatch[2], newBlock);
+            }
+          }
+
+          report.push(`Section "${sc.oldSize}" -> "${sc.newSize}": ${setsChanged} set(s), ${membersChanged} member(s) changed`);
+        }
+      }
+
+      // --- BOUNDARY CONDITION CHANGES ---
+      if (changes.boundaryConditions && changes.boundaryConditions.length > 0) {
+        // Code mapping: Fixed=4, Free=0
+        const codeMap = { "Fixed": 4, "Free": 0 };
+
+        const bcMatch = fileContent.match(/(\[BOUNDARY_CONDITIONS\] <\d+>)([\s\S]*?)(\[END_BOUNDARY_CONDITIONS\])/);
+        if (bcMatch) {
+          // Parse existing BC lines into a map: nodeIndex -> line
+          // BC line format: nodeIndex X Y Z RotX RotY RotZ [extra fields]
+          // We need to resolve node label -> node index first
+          const nodesOrdered = parseNodesOrdered(fileContent);
+          const nodeLabelToIndex = {};
+          nodesOrdered.forEach((n, i) => { nodeLabelToIndex[n.label] = i + 1; }); // 1-based
+
+          let bcBlock = bcMatch[2];
+          for (const bc of changes.boundaryConditions) {
+            const nodeIdx = nodeLabelToIndex[bc.nodeLabel];
+            if (!nodeIdx) {
+              report.push(`BC change: node "${bc.nodeLabel}" not found -- skipped`);
+              continue;
+            }
+
+            const lines = bcBlock.split("\n");
+            let found = false;
+            const newLines = lines.map(line => {
+              const t = line.trim().split(/\s+/);
+              if (t[0] === String(nodeIdx)) {
+                found = true;
+                // t: [nodeIdx, X, Y, Z, RotX, RotY, RotZ, ...]
+                const parts = line.split(/\s+/);
+                if (bc.x !== undefined) parts[1] = String(codeMap[bc.x]);
+                if (bc.y !== undefined) parts[2] = String(codeMap[bc.y]);
+                if (bc.z !== undefined) parts[3] = String(codeMap[bc.z]);
+                if (bc.rotX !== undefined) parts[4] = String(codeMap[bc.rotX]);
+                if (bc.rotY !== undefined) parts[5] = String(codeMap[bc.rotY]);
+                if (bc.rotZ !== undefined) parts[6] = String(codeMap[bc.rotZ]);
+                return parts.join(" ");
+              }
+              return line;
+            });
+            bcBlock = newLines.join("\n");
+            report.push(`BC "${bc.nodeLabel}": ${found ? "updated" : "node index found but no matching BC line -- may need to add new BC entry"}`);
+          }
+          fileContent = fileContent.replace(bcMatch[2], bcBlock);
+        } else {
+          report.push("No BOUNDARY_CONDITIONS section found.");
+        }
+      }
+
+      // --- LOAD MAGNITUDE CHANGES ---
+      if (changes.loadMagnitudes && changes.loadMagnitudes.length > 0) {
+        // Resolve load case name -> internal LC ID
+        const blcMatch = fileContent.match(/\[BASIC_LOAD_CASES\] <\d+>([\s\S]*?)\[END_BASIC_LOAD_CASES\]/);
+        const lcNameToId = {};
+        if (blcMatch) {
+          blcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+            const t = tokenize(line);
+            if (t && t.length >= 2) {
+              // Map both the sequential index and the name
+              lcNameToId[clean(t[1])] = t[0]; // name -> sequential index
+            }
+          });
+        }
+
+        const ddlMatch = fileContent.match(/(\[DIRECT_DISTRIBUTED_LOADS\] <\d+>)([\s\S]*?)(\[END_DIRECT_DISTRIBUTED_LOADS\])/);
+        if (ddlMatch) {
+          let ddlBlock = ddlMatch[2];
+          for (const lc of changes.loadMagnitudes) {
+            const endMag = lc.newEndMag !== undefined ? lc.newEndMag : lc.newStartMag;
+            let changed = 0;
+            // DDL line format: memberLabel lcID startMag endMag startLoc endLoc direction
+            const newBlock = ddlBlock.split("\n").map(line => {
+              if (!line.trim()) return line;
+              const t = tokenize(line);
+              if (!t || t.length < 4) return line;
+              const thisLabel = clean(t[0]);
+              if (thisLabel !== lc.memberLabel) return line;
+              // Check load case -- match by name lookup or direct ID
+              const lcId = lcNameToId[lc.loadCaseName];
+              if (lcId && t[1] !== lcId) return line;
+              // Replace start and end magnitudes (fields 2 and 3)
+              changed++;
+              const parts = line.trim().split(/\s+/);
+              parts[2] = lc.newStartMag.toFixed(6);
+              parts[3] = endMag.toFixed(6);
+              return parts.join(" ");
+            }).join("\n");
+            ddlBlock = newBlock;
+            report.push(`Load "${lc.memberLabel}" (${lc.loadCaseName}): magnitudes updated`);
+          }
+          fileContent = fileContent.replace(ddlMatch[2], ddlBlock);
+        } else {
+          report.push("No DIRECT_DISTRIBUTED_LOADS section found.");
+        }
+      }
+
+      // Write new file
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+      report.unshift(`Cloned model saved to: ${outputPath}`);
+      report.push(`Original unchanged: ${filePath}`);
+
+      return { content: [{ type: "text", text: report.join("\n") }] };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
