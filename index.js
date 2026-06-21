@@ -1465,5 +1465,301 @@ server.tool(
   }
 );
 
+
+// ---- Shape weight lookup (lb/ft) ----
+// AISC standard shapes. For W, C, L shapes the designation number IS the weight per foot.
+// For HSS/tube shapes the designation is dimensions, not weight, so those need an explicit table.
+// Sizes not covered here are flagged as "unknown" rather than guessed.
+const HSS_WEIGHT_TABLE = {
+  "HSS8X8X10": 25.3,   // 5/8" wall (0.10 designation maps to 0.625" actual in RISA naming convention)
+  "HSS4X4X4": 11.97,   // 1/4" wall
+  "HSS6X6X8": 17.6,
+  "HSS4X4X8": 9.84,
+  "HSS3X3X4": 7.04,
+  "HSS6X4X4": 11.97,
+  "HSS5X5X4": 11.4
+};
+
+// Returns weight in lb/ft for a given type + size designation, or null if unknown
+function getShapeWeight(type, size) {
+  const t = type.toLowerCase();
+  const s = size.toUpperCase().trim();
+
+  if (t === "wide flange" || t === "channel") {
+    // W14X22 -> 22, C15X33.9 -> 33.9 -- designation number after the X IS the weight/ft
+    const match = s.match(/X([\d.]+)$/);
+    if (match) return parseFloat(match[1]);
+    return null;
+  }
+
+  if (t === "none" && /^L\d/.test(s)) {
+    // Angles: designation does NOT equal weight. Common AISC angle weights (lb/ft):
+    const angleWeights = {
+      "L2X2X2": 3.19, "L2X2X3": 4.7, "L3X3X4": 9.4, "L4X4X4": 12.8,
+      "L3X3X2": 4.9, "L2.5X2.5X4": 7.7
+    };
+    return angleWeights[s] || null;
+  }
+
+  if (t === "tube") {
+    return HSS_WEIGHT_TABLE[s] || null;
+  }
+
+  return null;
+}
+
+// Tool 19: Material takeoff -- total weight by section size
+// Weight per foot comes from AISC shape designations (W/C shapes: number after X = lb/ft).
+// HSS and angle shapes use a lookup table -- sizes not in the table are flagged, not guessed.
+server.tool(
+  "get_material_takeoff",
+  { filePath: z.string().describe("Full path to the .r3d file") },
+  async ({ filePath }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      if (members.length === 0) {
+        return { content: [{ type: "text", text: "No members found in this model." }] };
+      }
+
+      // Group by type+size
+      const groups = {};
+      const unknownSizes = new Set();
+
+      members.forEach(m => {
+        const len = distance3D(m.iCoord, m.jCoord);
+        if (len === null) return;
+        const key = `${m.type}|${m.size}`;
+        if (!groups[key]) groups[key] = { type: m.type, size: m.size, count: 0, totalLengthFt: 0 };
+        groups[key].count++;
+        groups[key].totalLengthFt += len;
+      });
+
+      const rows = ["Type,Size,Count,TotalLength(ft),Weight(lb/ft),TotalWeight(lb)"];
+      let grandTotalWeight = 0;
+      let grandTotalLength = 0;
+
+      Object.values(groups).sort((a, b) => b.totalLengthFt - a.totalLengthFt).forEach(g => {
+        const wPerFt = getShapeWeight(g.type, g.size);
+        grandTotalLength += g.totalLengthFt;
+        if (wPerFt === null) {
+          unknownSizes.add(`${g.type} ${g.size}`);
+          rows.push(`${g.type},${g.size},${g.count},${g.totalLengthFt.toFixed(1)},UNKNOWN,UNKNOWN`);
+        } else {
+          const totalW = wPerFt * g.totalLengthFt;
+          grandTotalWeight += totalW;
+          rows.push(`${g.type},${g.size},${g.count},${g.totalLengthFt.toFixed(1)},${wPerFt},${totalW.toFixed(0)}`);
+        }
+      });
+
+      const summary = [
+        `Material Takeoff`,
+        `File: ${filePath}`,
+        `Total members: ${members.length}`,
+        `Total length (all members): ${grandTotalLength.toFixed(1)} ft`,
+        `Total weight (known shapes only): ${grandTotalWeight.toFixed(0)} lb (${(grandTotalWeight / 2000).toFixed(2)} tons)`,
+        unknownSizes.size > 0 ? `\nWeight unknown for: ${[...unknownSizes].join(", ")} -- not included in total. Add these to the lookup table in index.js to include them.` : "",
+        ``,
+        rows.join("\n")
+      ].filter(l => l !== "").join("\n");
+
+      return { content: [{ type: "text", text: summary }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 20: Flag members for unbraced length review
+// This does NOT perform a KL/r calculation -- that requires K-factors and design
+// intent only the engineer can determine. Instead it flags members exceeding a
+// simple length threshold for manual review, grouped by section type since
+// reasonable unbraced lengths vary a lot by shape (HSS columns vs W-shape beams).
+server.tool(
+  "find_unbraced_length_issues",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    thresholdFt: z.number().optional().default(15)
+      .describe("Flag members longer than this length (ft) for review. Default 15 ft.")
+  },
+  async ({ filePath, thresholdFt }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      if (members.length === 0) {
+        return { content: [{ type: "text", text: "No members found in this model." }] };
+      }
+
+      const flagged = [];
+      members.forEach(m => {
+        const len = distance3D(m.iCoord, m.jCoord);
+        if (len !== null && len > thresholdFt) {
+          flagged.push({ ...m, length: len });
+        }
+      });
+
+      if (flagged.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No members exceed ${thresholdFt} ft. No length-based review flags.\n\nNote: this is a length screen only, not a KL/r or slenderness check. It does not account for intermediate brace points, K-factors, or load type.`
+          }]
+        };
+      }
+
+      flagged.sort((a, b) => b.length - a.length);
+      const rows = ["Label,Type,Size,Length(ft),iNode,jNode"];
+      flagged.forEach(m => {
+        rows.push(`${m.label},${m.type},${m.size},${m.length.toFixed(2)},${m.iNode || "?"},${m.jNode || "?"}`);
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `Members for unbraced length review (>${thresholdFt} ft): ${flagged.length} of ${members.length} total\n\n` +
+            `Note: this is a length screen only -- it flags members for your review, it does NOT calculate KL/r, ` +
+            `account for intermediate brace points, or apply K-factors. Use engineering judgment to confirm whether ` +
+            `each flagged member's actual unbraced length and slenderness are acceptable.\n\n` +
+            rows.join("\n")
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 21: Export member schedule directly to a real .xlsx file
+// Writes an actual Excel file to outputPath instead of returning CSV text to copy-paste.
+server.tool(
+  "export_member_schedule_to_excel",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    outputPath: z.string().describe("Full path for the .xlsx file to create, e.g. C:\\\\Users\\\\you\\\\Desktop\\\\schedule.xlsx")
+  },
+  async ({ filePath, outputPath }) => {
+    try {
+      const XLSX = await import("xlsx");
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      if (members.length === 0) {
+        return { content: [{ type: "text", text: "No members found in this file." }] };
+      }
+
+      const data = [["Label", "Type", "Size", "iNode", "jNode", "Length (ft)"]];
+      members.forEach(m => {
+        const len = distance3D(m.iCoord, m.jCoord);
+        data.push([m.label, m.type, m.size, m.iNode || "?", m.jNode || "?", len !== null ? parseFloat(len.toFixed(2)) : "N/A"]);
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws["!cols"] = [{ wch: 10 }, { wch: 14 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 12 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Member Schedule");
+      XLSX.writeFile(wb, outputPath);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Member schedule (${members.length} members) saved to:\n${outputPath}`
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 22: Export batch folder summary directly to a real .xlsx file
+server.tool(
+  "batch_summarize_folder_to_excel",
+  {
+    folderPath: z.string().describe("Full path to the folder containing .r3d files"),
+    outputPath: z.string().describe("Full path for the .xlsx file to create"),
+    filterName: z.string().optional()
+      .describe("Optional: only include files whose name contains this string (case-insensitive)")
+  },
+  async ({ folderPath, outputPath, filterName }) => {
+    try {
+      const XLSX = await import("xlsx");
+
+      let files;
+      try {
+        files = fs.readdirSync(folderPath);
+      } catch (e) {
+        return { content: [{ type: "text", text: `Cannot read folder: ${e.message}` }] };
+      }
+
+      let r3dFiles = files.filter(f => f.toLowerCase().endsWith(".r3d"));
+      if (filterName) {
+        r3dFiles = r3dFiles.filter(f => f.toLowerCase().includes(filterName.toLowerCase()));
+      }
+
+      if (r3dFiles.length === 0) {
+        return { content: [{ type: "text", text: `No .r3d files found in folder${filterName ? ` matching "${filterName}"` : ""}.` }] };
+      }
+
+      const data = [["FileName", "Title", "Designer", "Nodes", "Members", "SectionSets", "LoadCombos", "FileSizeKB", "QCIssues"]];
+
+      for (const fileName of r3dFiles) {
+        const fp = folderPath.replace(/[\\/]+$/, "") + "\\" + fileName;
+        try {
+          const content = fs.readFileSync(fp, "utf8");
+
+          const titleMatch = content.match(/\[\.\.MODEL_TITLE\] <1>\s*\n([^\n]+)/);
+          const designerMatch = content.match(/\[\.\.DESIGNER_NAME\] <1>\s*\n([^\n]+)/);
+          const title = titleMatch ? clean(titleMatch[1]) : "";
+          const designer = designerMatch ? clean(designerMatch[1]) : "";
+
+          const nodeMatch = content.match(/\[NODES\] <(\d+)>/);
+          const memberMatch = content.match(/\[MEMBERS_MAIN_DATA\] <(\d+)>/);
+          const setsMatch = content.match(/\[\.HR_STEEL_SECTION_SETS\] <(\d+)>/);
+          const lcMatch = content.match(/\[LOAD_COMBINATIONS\] <(\d+)>/);
+
+          const nodeCount = nodeMatch ? parseInt(nodeMatch[1]) : 0;
+          const memberCount = memberMatch ? parseInt(memberMatch[1]) : 0;
+          const setsCount = setsMatch ? parseInt(setsMatch[1]) : 0;
+          const lcCount = lcMatch ? parseInt(lcMatch[1]) : 0;
+          const fileSizeKB = Math.round(fs.statSync(fp).size / 1024);
+
+          const nodesOrdered = parseNodesOrdered(content);
+          const members = parseMembersResolved(content, nodesOrdered);
+          const unassigned = members.filter(m => !m.size || m.size === "None" || m.size === "").length;
+          const invalidRefs = members.filter(m => !m.iNode || !m.jNode).length;
+          const qcIssues = [];
+          if (unassigned > 0) qcIssues.push(`${unassigned} unassigned`);
+          if (invalidRefs > 0) qcIssues.push(`${invalidRefs} invalid refs`);
+          const qcSummary = qcIssues.length > 0 ? qcIssues.join("; ") : "OK";
+
+          data.push([fileName, title, designer, nodeCount, memberCount, setsCount, lcCount, fileSizeKB, qcSummary]);
+        } catch (fileErr) {
+          data.push([fileName, "ERROR", "", "", "", "", "", "", fileErr.message]);
+        }
+      }
+
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws["!cols"] = [{ wch: 30 }, { wch: 30 }, { wch: 16 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Batch Summary");
+      XLSX.writeFile(wb, outputPath);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Batch summary (${r3dFiles.length} models) saved to:\n${outputPath}`
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
