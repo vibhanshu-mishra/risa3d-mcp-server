@@ -2278,5 +2278,337 @@ server.tool(
   }
 );
 
+
+// Tool 25: find_duplicate_nodes
+// Scans the model for nodes whose coordinates are within a tolerance of each other.
+// Duplicate nodes cause members to appear connected when they aren't, or create
+// zero-length members, both of which produce wrong analysis results silently.
+// Default tolerance is 0.001 ft (~0.3mm) -- tight enough to catch real duplicates
+// without false-positives from intentional close-but-distinct geometry.
+server.tool(
+  "find_duplicate_nodes",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    toleranceFt: z.number().optional().default(0.001)
+      .describe("Distance tolerance in feet. Nodes closer than this are flagged as duplicates. Default 0.001 ft (~0.3mm).")
+  },
+  async ({ filePath, toleranceFt }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodes = parseNodesOrdered(content);
+
+      if (nodes.length === 0) {
+        return { content: [{ type: "text", text: "No nodes found in file." }] };
+      }
+
+      const duplicates = [];
+      // O(n^2) scan -- fine for typical stair models (100-300 nodes)
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const dist = distance3D(nodes[i], nodes[j]);
+          if (dist !== null && dist <= toleranceFt) {
+            duplicates.push({
+              a: nodes[i].label,
+              b: nodes[j].label,
+              dist: parseFloat(dist.toFixed(6)),
+              ax: nodes[i].x, ay: nodes[i].y, az: nodes[i].z,
+              bx: nodes[j].x, by: nodes[j].y, bz: nodes[j].z
+            });
+          }
+        }
+      }
+
+      if (duplicates.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No duplicate nodes found (tolerance: ${toleranceFt} ft).\n${nodes.length} nodes checked.`
+          }]
+        };
+      }
+
+      const rows = ["NodeA,NodeB,Distance(ft),Ax,Ay,Az,Bx,By,Bz"];
+      duplicates.forEach(d => {
+        rows.push(`${d.a},${d.b},${d.dist},${d.ax},${d.ay},${d.az},${d.bx},${d.by},${d.bz}`);
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `Duplicate nodes found: ${duplicates.length} pair(s) within ${toleranceFt} ft\n` +
+            `${nodes.length} total nodes checked.\n\n` +
+            `These nodes share nearly identical coordinates. Members connecting to duplicate ` +
+            `nodes may appear connected in the model view but will have incorrect analysis ` +
+            `behavior. Use Model Merge in RISA-3D (Tools > Model Merge) to resolve.\n\n` +
+            rows.join("\n")
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 26: replace_section_size_in_folder
+// Replaces a section size across ALL .r3d files in a folder, saving each as a
+// new file with a suffix (never overwrites originals).
+// Useful for standardizing sizes across a project folder or updating a size
+// that was changed in a spec after multiple models were already built.
+server.tool(
+  "replace_section_size_in_folder",
+  {
+    folderPath: z.string().describe("Full path to the folder containing .r3d files"),
+    oldSize: z.string().describe("Section size to replace, e.g. C15X33.9"),
+    newSize: z.string().describe("Replacement section size, e.g. C12X20.7"),
+    outputSuffix: z.string().optional().default("-revised")
+      .describe("Suffix appended to each output filename before the extension. Default: -revised"),
+    filterName: z.string().optional()
+      .describe("Optional: only process files whose name contains this string (case-insensitive)")
+  },
+  async ({ folderPath, oldSize, newSize, outputSuffix, filterName }) => {
+    try {
+      let files;
+      try {
+        files = fs.readdirSync(folderPath);
+      } catch (e) {
+        return { content: [{ type: "text", text: `Cannot read folder: ${e.message}` }] };
+      }
+
+      let r3dFiles = files.filter(f => f.toLowerCase().endsWith(".r3d"));
+      if (filterName) {
+        r3dFiles = r3dFiles.filter(f => f.toLowerCase().includes(filterName.toLowerCase()));
+      }
+      if (r3dFiles.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No .r3d files found in folder${filterName ? ` matching "${filterName}"` : ""}.`
+          }]
+        };
+      }
+
+      const basePath = folderPath.replace(/[\\/]+$/, "");
+      const results = [];
+      let totalChanged = 0;
+
+      for (const fileName of r3dFiles) {
+        const inputPath = `${basePath}\\${fileName}`;
+        const baseName = fileName.replace(/\.r3d$/i, "");
+        const outputPath = `${basePath}\\${baseName}${outputSuffix}.r3d`;
+
+        try {
+          let fileContent = fs.readFileSync(inputPath, "utf8");
+
+          // Count occurrences before replacing
+          const regex = new RegExp(oldSize.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+          const matchCount = (fileContent.match(regex) || []).length;
+
+          if (matchCount === 0) {
+            results.push(`${fileName}: no matches -- skipped (no output file written)`);
+            continue;
+          }
+
+          fileContent = fileContent.replace(regex, newSize);
+          fs.writeFileSync(outputPath, fileContent, "utf8");
+          totalChanged += matchCount;
+          results.push(`${fileName}: ${matchCount} replacement(s) -> saved as ${baseName}${outputSuffix}.r3d`);
+        } catch (fileErr) {
+          results.push(`${fileName}: ERROR -- ${fileErr.message}`);
+        }
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Section size replacement: "${oldSize}" -> "${newSize}"`,
+            `Folder: ${folderPath}`,
+            `Files processed: ${r3dFiles.length}`,
+            `Total replacements made: ${totalChanged}`,
+            ``,
+            results.join("\n"),
+            ``,
+            `Originals unchanged. Open each revised file in RISA-3D to confirm section ` +
+            `properties loaded correctly before using for analysis.`
+          ].join("\n")
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 27: compare_risa_models
+// Diffs two .r3d files and reports exactly what changed: nodes added/removed/moved,
+// members added/removed/changed section, section sets changed, load combinations changed.
+// Useful for tracking design iterations and documenting what changed between submittals.
+server.tool(
+  "compare_risa_models",
+  {
+    baseFilePath: z.string().describe("Full path to the baseline (older/original) .r3d file"),
+    revisedFilePath: z.string().describe("Full path to the revised (newer) .r3d file")
+  },
+  async ({ baseFilePath, revisedFilePath }) => {
+    try {
+      const baseContent = fs.readFileSync(baseFilePath, "utf8");
+      const revisedContent = fs.readFileSync(revisedFilePath, "utf8");
+
+      const baseNodes = parseNodesOrdered(baseContent);
+      const revisedNodes = parseNodesOrdered(revisedContent);
+      const baseMembers = parseMembersResolved(baseContent, baseNodes);
+      const revisedMembers = parseMembersResolved(revisedContent, revisedNodes);
+
+      // Index by label for fast lookup
+      const baseNodeMap = Object.fromEntries(baseNodes.map(n => [n.label, n]));
+      const revisedNodeMap = Object.fromEntries(revisedNodes.map(n => [n.label, n]));
+      const baseMemberMap = Object.fromEntries(baseMembers.map(m => [m.label, m]));
+      const revisedMemberMap = Object.fromEntries(revisedMembers.map(m => [m.label, m]));
+
+      const COORD_TOL = 0.001; // ft -- treat coord changes smaller than this as unchanged
+      const report = [];
+
+      // ---- Node diff ----
+      const addedNodes = revisedNodes.filter(n => !baseNodeMap[n.label]);
+      const removedNodes = baseNodes.filter(n => !revisedNodeMap[n.label]);
+      const movedNodes = baseNodes.filter(n => {
+        const r = revisedNodeMap[n.label];
+        if (!r) return false;
+        return distance3D(n, r) > COORD_TOL;
+      });
+
+      report.push("=== NODES ===");
+      if (addedNodes.length === 0 && removedNodes.length === 0 && movedNodes.length === 0) {
+        report.push("No node changes.");
+      } else {
+        if (addedNodes.length > 0) {
+          report.push(`Added (${addedNodes.length}): ${addedNodes.map(n => n.label).join(", ")}`);
+        }
+        if (removedNodes.length > 0) {
+          report.push(`Removed (${removedNodes.length}): ${removedNodes.map(n => n.label).join(", ")}`);
+        }
+        if (movedNodes.length > 0) {
+          report.push(`Moved (${movedNodes.length}):`);
+          movedNodes.forEach(n => {
+            const r = revisedNodeMap[n.label];
+            const dist = distance3D(n, r);
+            report.push(`  ${n.label}: (${n.x},${n.y},${n.z}) -> (${r.x},${r.y},${r.z}) [delta ${dist.toFixed(4)} ft]`);
+          });
+        }
+      }
+
+      // ---- Member diff ----
+      const addedMembers = revisedMembers.filter(m => !baseMemberMap[m.label]);
+      const removedMembers = baseMembers.filter(m => !revisedMemberMap[m.label]);
+      const changedMembers = baseMembers.filter(m => {
+        const r = revisedMemberMap[m.label];
+        if (!r) return false;
+        return m.size !== r.size || m.type !== r.type ||
+          m.iNode !== r.iNode || m.jNode !== r.jNode;
+      });
+
+      report.push("\n=== MEMBERS ===");
+      if (addedMembers.length === 0 && removedMembers.length === 0 && changedMembers.length === 0) {
+        report.push("No member changes.");
+      } else {
+        if (addedMembers.length > 0) {
+          report.push(`Added (${addedMembers.length}):`);
+          addedMembers.forEach(m => report.push(`  ${m.label}: ${m.type} ${m.size} [${m.iNode}->${m.jNode}]`));
+        }
+        if (removedMembers.length > 0) {
+          report.push(`Removed (${removedMembers.length}): ${removedMembers.map(m => m.label).join(", ")}`);
+        }
+        if (changedMembers.length > 0) {
+          report.push(`Changed (${changedMembers.length}):`);
+          changedMembers.forEach(m => {
+            const r = revisedMemberMap[m.label];
+            const changes = [];
+            if (m.size !== r.size) changes.push(`size: ${m.size} -> ${r.size}`);
+            if (m.type !== r.type) changes.push(`type: ${m.type} -> ${r.type}`);
+            if (m.iNode !== r.iNode || m.jNode !== r.jNode) {
+              changes.push(`nodes: ${m.iNode}->${m.jNode} vs ${r.iNode}->${r.jNode}`);
+            }
+            report.push(`  ${m.label}: ${changes.join("; ")}`);
+          });
+        }
+      }
+
+      // ---- Section set diff ----
+      const parseSets = (c) => {
+        const m = c.match(/\[\.HR_STEEL_SECTION_SETS\] <\d+>([\s\S]*?)\[\.END_HR_STEEL_SECTION_SETS\]/);
+        if (!m) return {};
+        const sets = {};
+        m[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+          const t = tokenize(line);
+          if (t.length >= 3) {
+            sets[clean(t[0])] = { type: clean(t[1]), size: clean(t[2]) };
+          }
+        });
+        return sets;
+      };
+
+      const baseSets = parseSets(baseContent);
+      const revisedSets = parseSets(revisedContent);
+      const allSetNames = new Set([...Object.keys(baseSets), ...Object.keys(revisedSets)]);
+
+      report.push("\n=== SECTION SETS ===");
+      const setChanges = [];
+      allSetNames.forEach(name => {
+        const b = baseSets[name];
+        const r = revisedSets[name];
+        if (!b) setChanges.push(`  Added: "${name}" (${r.type} ${r.size})`);
+        else if (!r) setChanges.push(`  Removed: "${name}"`);
+        else if (b.size !== r.size || b.type !== r.type) {
+          setChanges.push(`  Changed: "${name}" -- ${b.type} ${b.size} -> ${r.type} ${r.size}`);
+        }
+      });
+      if (setChanges.length === 0) {
+        report.push("No section set changes.");
+      } else {
+        report.push(...setChanges);
+      }
+
+      // ---- Load combination diff ----
+      const parseLCs = (c) => {
+        const m = c.match(/\[LOAD_COMBINATIONS\] <(\d+)>/);
+        return m ? parseInt(m[1], 10) : 0;
+      };
+      const baseLCCount = parseLCs(baseContent);
+      const revisedLCCount = parseLCs(revisedContent);
+
+      report.push("\n=== LOAD COMBINATIONS ===");
+      if (baseLCCount === revisedLCCount) {
+        report.push(`No change (${baseLCCount} combinations in both).`);
+      } else {
+        report.push(`Count changed: ${baseLCCount} -> ${revisedLCCount}`);
+      }
+
+      // ---- Summary header ----
+      const totalChanges = addedNodes.length + removedNodes.length + movedNodes.length +
+        addedMembers.length + removedMembers.length + changedMembers.length + setChanges.length +
+        (baseLCCount !== revisedLCCount ? 1 : 0);
+
+      const header = [
+        `Model Comparison`,
+        `Base:    ${baseFilePath}`,
+        `Revised: ${revisedFilePath}`,
+        `Nodes:    ${baseNodes.length} -> ${revisedNodes.length}`,
+        `Members:  ${baseMembers.length} -> ${revisedMembers.length}`,
+        `Total changes detected: ${totalChanges}`,
+        ``
+      ];
+
+      return {
+        content: [{
+          type: "text",
+          text: header.join("\n") + report.join("\n")
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
