@@ -1761,5 +1761,522 @@ server.tool(
   }
 );
 
+
+// Tool 23: add_member
+// Adds a new member to a RISA-3D model and saves as a NEW file (never overwrites original).
+// Can connect two EXISTING nodes (by label) or create new nodes at given coordinates.
+//
+// SAFETY DESIGN NOTES (confirmed against raw .r3d format across multiple real models):
+// - NODES section uses scientific notation (e.g. 1.200000000000e+01), a DIFFERENT
+//   numeric format than MEMBERS_MAIN_DATA which uses plain decimals (e.g. 0.000000).
+//   New node lines MUST use scientific notation or RISA will misparse them.
+// - Every node line ends in a fixed trailing block: "0.000000000000e+00 65535 0 0 -1 -1 0".
+//   This was verified identical across 300+ node lines in two different real project
+//   models with completely different geometry, so it is treated as a universal
+//   constant and copied verbatim rather than guessed.
+// - Members reference nodes by their 1-based POSITION in the NODES list, not by label.
+//   New nodes are always APPENDED to the end of the NODES block so no existing
+//   member's i/j node reference ever shifts.
+// - New member lines clone the FULL trailing field structure (orientation/release
+//   bitmask, etc.) from an existing member of the SAME type in the model, changing
+//   only label, size, and node indices. These trailing fields vary by member type
+//   (Tube vs Wide Flange vs Channel vs None/Angle) and are not understood well enough
+//   to hand-construct safely.
+// - Header counts (<193>, <168>, etc.) are recalculated by actual line count after
+//   the edit, never by manual increment, to eliminate off-by-one risk.
+server.tool(
+  "add_member",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file to save (must be different from source)"),
+    type: z.enum(["Tube", "Wide Flange", "Channel", "None"]).describe("Member type/category. Use 'None' for angles."),
+    size: z.string().describe("Section size designation e.g. HSS4X4X4, W14X22, C6X8.2, L2X2X2"),
+    label: z.string().optional().describe("Label for the new member e.g. M999. If omitted, an unused label is generated automatically."),
+    iNodeLabel: z.string().optional().describe("Existing node label for the start point e.g. N44. Use this OR iCoord, not both."),
+    jNodeLabel: z.string().optional().describe("Existing node label for the end point e.g. N45. Use this OR jCoord, not both."),
+    iCoord: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional()
+      .describe("New node coordinates for the start point, if not connecting to an existing node. A new node is created and appended to the model."),
+    jCoord: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional()
+      .describe("New node coordinates for the end point, if not connecting to an existing node. A new node is created and appended to the model."),
+    newINodeLabel: z.string().optional().describe("Label for a newly created start node, if iCoord is used. If omitted, an unused label is generated automatically."),
+    newJNodeLabel: z.string().optional().describe("Label for a newly created end node, if jCoord is used. If omitted, an unused label is generated automatically.")
+  },
+  async ({ filePath, outputPath, type, size, label, iNodeLabel, jNodeLabel, iCoord, jCoord, newINodeLabel, newJNodeLabel }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+      }
+
+      // Must specify exactly one of (iNodeLabel) or (iCoord) for each end
+      if (!iNodeLabel && !iCoord) {
+        return { content: [{ type: "text", text: "Error: must provide either iNodeLabel (existing node) or iCoord (new node coordinates) for the start point." }] };
+      }
+      if (!jNodeLabel && !jCoord) {
+        return { content: [{ type: "text", text: "Error: must provide either jNodeLabel (existing node) or jCoord (new node coordinates) for the end point." }] };
+      }
+      if (iNodeLabel && iCoord) {
+        return { content: [{ type: "text", text: "Error: provide only one of iNodeLabel or iCoord for the start point, not both." }] };
+      }
+      if (jNodeLabel && jCoord) {
+        return { content: [{ type: "text", text: "Error: provide only one of jNodeLabel or jCoord for the end point, not both." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+      const report = [];
+
+      // ---- Parse existing nodes in file order (this IS the positional index) ----
+      const nodesMatch = fileContent.match(/(\[NODES\] <)(\d+)(>)([\s\S]*?)(\[END_NODES\])/);
+      if (!nodesMatch) {
+        return { content: [{ type: "text", text: "Error: could not find [NODES] section in file." }] };
+      }
+      const nodesBlockBody = nodesMatch[4];
+      const nodeLines = nodesBlockBody.split("\n").filter(l => l.trim());
+      const existingNodeLabels = nodeLines.map(line => clean(tokenize(line)[0]));
+      const existingNodeLabelSet = new Set(existingNodeLabels);
+
+      // Helper: generate an unused label like N9001, N9002, ... avoiding collisions
+      function generateUnusedNodeLabel(usedSet) {
+        let n = 9001;
+        while (usedSet.has(`N${n}`)) n++;
+        return `N${n}`;
+      }
+      function generateUnusedMemberLabel(content) {
+        const allLabels = new Set();
+        const mMatch = content.match(/\[\.MEMBERS_MAIN_DATA\] <\d+>([\s\S]*?)\[\.END_MEMBERS_MAIN_DATA\]/);
+        if (mMatch) {
+          mMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+            allLabels.add(clean(tokenize(line)[0]));
+          });
+        }
+        let n = 9001;
+        while (allLabels.has(`M${n}`)) n++;
+        return `M${n}`;
+      }
+
+      // Validate referenced existing node labels exist
+      if (iNodeLabel && !existingNodeLabelSet.has(iNodeLabel)) {
+        return { content: [{ type: "text", text: `Error: node "${iNodeLabel}" not found in model. Use list_nodes to see available labels.` }] };
+      }
+      if (jNodeLabel && !existingNodeLabelSet.has(jNodeLabel)) {
+        return { content: [{ type: "text", text: `Error: node "${jNodeLabel}" not found in model. Use list_nodes to see available labels.` }] };
+      }
+
+      // Get the trailing constant block from the last existing node line, to copy verbatim.
+      // The tokenizer does not separate the trailing semicolon from the final field
+      // (e.g. the last token comes through as "0;"), so it must be stripped here and
+      // a single semicolon re-added when the new line is assembled, or a double
+      // semicolon results.
+      const lastNodeLine = nodeLines[nodeLines.length - 1];
+      const lastNodeTokens = tokenize(lastNodeLine);
+      // Tokens: [0]=label(quoted), [1]=X, [2]=Y, [3]=Z, [4..]=trailing constant block
+      const trailingNodeFields = lastNodeTokens.slice(4).join(" ").replace(/;\s*$/, "");
+
+      // Format a coordinate value in RISA's scientific notation style (12 decimal places)
+      function formatSciNotation(val) {
+        return val.toExponential(12).replace(/e([+-])(\d+)/, (m, sign, digits) => {
+          return `e${sign}${digits.padStart(2, "0")}`;
+        });
+      }
+
+      function buildNodeLine(labelStr, x, y, z) {
+        const paddedLabel = `"${padRISA(labelStr)}"`;
+        return `${paddedLabel}   ${formatSciNotation(x)}   ${formatSciNotation(y)}   ${formatSciNotation(z)}   ${trailingNodeFields};`;
+      }
+
+      // ---- Resolve / create start node ----
+      let iLabel, iIndex;
+      const newNodeLinesToAppend = [];
+      if (iNodeLabel) {
+        iLabel = iNodeLabel;
+        iIndex = existingNodeLabels.indexOf(iNodeLabel) + 1; // 1-based
+      } else {
+        iLabel = newINodeLabel || generateUnusedNodeLabel(existingNodeLabelSet);
+        if (existingNodeLabelSet.has(iLabel)) {
+          return { content: [{ type: "text", text: `Error: requested new node label "${iLabel}" already exists in the model. Choose a different label.` }] };
+        }
+        existingNodeLabelSet.add(iLabel);
+        newNodeLinesToAppend.push(buildNodeLine(iLabel, iCoord.x, iCoord.y, iCoord.z));
+        iIndex = nodeLines.length + newNodeLinesToAppend.length; // position after append
+        report.push(`Created new node "${iLabel}" at (${iCoord.x}, ${iCoord.y}, ${iCoord.z})`);
+      }
+
+      // ---- Resolve / create end node ----
+      let jLabel, jIndex;
+      if (jNodeLabel) {
+        jLabel = jNodeLabel;
+        jIndex = existingNodeLabels.indexOf(jNodeLabel) + 1; // 1-based
+      } else {
+        jLabel = newJNodeLabel || generateUnusedNodeLabel(existingNodeLabelSet);
+        if (existingNodeLabelSet.has(jLabel)) {
+          return { content: [{ type: "text", text: `Error: requested new node label "${jLabel}" already exists in the model. Choose a different label.` }] };
+        }
+        existingNodeLabelSet.add(jLabel);
+        newNodeLinesToAppend.push(buildNodeLine(jLabel, jCoord.x, jCoord.y, jCoord.z));
+        jIndex = nodeLines.length + newNodeLinesToAppend.length; // position after append
+        report.push(`Created new node "${jLabel}" at (${jCoord.x}, ${jCoord.y}, ${jCoord.z})`);
+      }
+
+      if (iLabel === jLabel) {
+        return { content: [{ type: "text", text: "Error: start and end node are the same. A member cannot have zero length." }] };
+      }
+
+      // ---- Append new nodes to NODES block and recalculate header count ----
+      if (newNodeLinesToAppend.length > 0) {
+        const updatedNodesBody = nodesBlockBody.replace(/\s*$/, "") + "\n" + newNodeLinesToAppend.join("\n") + "\n";
+        const newNodeCount = nodeLines.length + newNodeLinesToAppend.length;
+        const newNodesSection = `${nodesMatch[1]}${newNodeCount}${nodesMatch[3]}${updatedNodesBody}${nodesMatch[5]}`;
+        fileContent = fileContent.replace(nodesMatch[0], newNodesSection);
+      }
+
+      // ---- Find a template member of the matching type to clone trailing fields from ----
+      const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+      if (!membersMatch) {
+        return { content: [{ type: "text", text: "Error: could not find [.MEMBERS_MAIN_DATA] section in file." }] };
+      }
+      const membersBlockBody = membersMatch[4];
+      const memberLines = membersBlockBody.split("\n").filter(l => l.trim());
+
+      let templateLine = null;
+      for (const line of memberLines) {
+        const t = tokenize(line);
+        if (clean(t[1]) === type) {
+          templateLine = line;
+          break;
+        }
+      }
+      if (!templateLine) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error: no existing member of type "${type}" found in this model to use as a template. ` +
+              `This tool clones the trailing field structure from an existing member of the same type rather than ` +
+              `guessing it, so at least one member of type "${type}" must already exist in the model. ` +
+              `Existing types in this model: ${[...new Set(memberLines.map(l => clean(tokenize(l)[1])))].join(", ")}`
+          }]
+        };
+      }
+
+      // ---- Build the new member line from the template ----
+      const templateTokens = tokenize(templateLine);
+      // Tokens: [0]=label, [1]=type, [2]=size, [3]=iNodeIdx, [4]=jNodeIdx, [5..]=trailing fields
+      const newLabel = label || generateUnusedMemberLabel(fileContent);
+
+      // Check label doesn't already exist
+      const existingMemberLabels = new Set(memberLines.map(l => clean(tokenize(l)[0])));
+      if (existingMemberLabels.has(newLabel)) {
+        return { content: [{ type: "text", text: `Error: member label "${newLabel}" already exists in the model. Choose a different label.` }] };
+      }
+
+      const newTokens = [...templateTokens];
+      newTokens[0] = `"${padRISA(newLabel)}"`;
+      newTokens[1] = `"${padRISA(type)}"`;
+      newTokens[2] = `"${padRISA(size)}"`;
+      newTokens[3] = String(iIndex);
+      newTokens[4] = String(jIndex);
+      const newMemberLine = newTokens.join(" ");
+
+      // ---- Append new member line and recalculate header count ----
+      const updatedMembersBody = membersBlockBody.replace(/\s*$/, "") + "\n" + newMemberLine + "\n";
+      const newMemberCount = memberLines.length + 1;
+      const newMembersSection = `${membersMatch[1]}${newMemberCount}${membersMatch[3]}${updatedMembersBody}${membersMatch[5]}`;
+      fileContent = fileContent.replace(membersMatch[0], newMembersSection);
+
+      // ---- Write new file ----
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      report.unshift(`Modified model saved to: ${outputPath}`);
+      report.push(`New member "${newLabel}": ${type} ${size}, ${iLabel} (idx ${iIndex}) -> ${jLabel} (idx ${jIndex})`);
+      report.push(`Template member used for field structure: "${clean(templateTokens[0])}"`);
+      report.push(`Original unchanged: ${filePath}`);
+      report.push(``);
+      report.push(`IMPORTANT: open the saved file in RISA-3D and confirm it loads without errors and the new member appears correctly before relying on this model.`);
+
+      return { content: [{ type: "text", text: report.join("\n") }] };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+
+// Tool 24: export_to_saf
+// Exports a RISA-3D .r3d model to SAF format (.xlsx) for import into
+// other structural analysis software (SCIA Engineer, SOFiSTiK, AxisVM, etc.)
+//
+// SAF is an open Excel-based exchange format by the Nemetschek Group:
+// https://www.saf.guide
+//
+// IMPORTANT LIMITATIONS NOTED IN OUTPUT:
+// 1. UNITS: RISA-3D uses feet. SAF requires meters. All coordinates are
+//    converted automatically (1 ft = 0.3048 m).
+// 2. VERTICAL AXIS: RISA-3D uses Y as the vertical axis. SAF and most
+//    receiving software expect Z as vertical. This tool does NOT swap axes
+//    automatically -- that changes your model geometry and must be a deliberate
+//    decision. The output file includes a warning sheet noting this. RISA itself
+//    requires a Y->Z axis change before its own SAF export for the same reason.
+//
+// Sheets produced:
+//   StructuralMaterial       -- steel material (one row, A992/A500)
+//   StructuralCrossSection   -- one row per unique section set
+//   StructuralPointConnection -- one row per node (coordinates in meters)
+//   StructuralCurveMember    -- one row per member
+//   StructuralPointSupport   -- one row per boundary condition node
+//   NOTES                    -- limitations and conversion details
+server.tool(
+  "export_to_saf",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the SAF .xlsx file to create, e.g. C:\\\\Users\\\\you\\\\Desktop\\\\model.xlsx")
+  },
+  async ({ filePath, outputPath }) => {
+    try {
+      const XLSX = await import("xlsx");
+      const fileContent = fs.readFileSync(filePath, "utf8");
+
+      // ---- Parse nodes ----
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      if (nodesOrdered.length === 0) {
+        return { content: [{ type: "text", text: "Error: no nodes found in file." }] };
+      }
+
+      // ---- Parse members ----
+      const members = parseMembersResolved(fileContent, nodesOrdered);
+      if (members.length === 0) {
+        return { content: [{ type: "text", text: "Error: no members found in file." }] };
+      }
+
+      // ---- Parse section sets ----
+      const setsMatch = fileContent.match(/\[\.HR_STEEL_SECTION_SETS\] <\d+>([\s\S]*?)\[\.END_HR_STEEL_SECTION_SETS\]/);
+      const sectionSets = {}; // label -> { type, size }
+      if (setsMatch) {
+        setsMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+          const t = tokenize(line);
+          if (t.length >= 3) {
+            const label = clean(t[0]);
+            const type = clean(t[1]);
+            const size = clean(t[2]);
+            sectionSets[label] = { type, size };
+          }
+        });
+      }
+
+      // ---- Parse boundary conditions ----
+      // BOUNDARY_CONDITIONS format: nodeIndex, Tx, Ty, Tz, Rx, Ry, Rz
+      // code 1 = fixed/restrained, 0 = free
+      const bcMatch = fileContent.match(/\[BOUNDARY_CONDITIONS\] <\d+>([\s\S]*?)\[END_BOUNDARY_CONDITIONS\]/);
+      const boundaryConditions = []; // { nodeLabel, ux, uy, uz, fix }
+      if (bcMatch) {
+        bcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+          const t = tokenize(line);
+          if (t.length >= 4) {
+            const nodeIdx = parseInt(t[0], 10);
+            const tx = parseInt(t[1], 10); // 1=fixed
+            const ty = parseInt(t[2], 10);
+            const tz = parseInt(t[3], 10);
+            const nodeObj = nodesOrdered[nodeIdx - 1];
+            if (nodeObj) {
+              boundaryConditions.push({
+                nodeLabel: nodeObj.label,
+                tx, ty, tz
+              });
+            }
+          }
+        });
+      }
+
+      // ---- Conversion constant ----
+      const FT_TO_M = 0.3048;
+
+      // ---- Build unique materials from section sets ----
+      // RISA uses A992 for Wide Flange, A500 Gr.B for HSS/Tube, A36 for angles/channels
+      // Map RISA type -> SAF material name
+      const typeToMaterial = {
+        "Wide Flange": "A992",
+        "Tube": "A500 Gr.B RECT",
+        "Channel": "A36",
+        "None": "A36"
+      };
+      const materialsNeeded = new Set(members.map(m => typeToMaterial[m.type] || "Steel"));
+
+      // ---- Sheet 1: StructuralMaterial ----
+      const matHeaders = ["Name", "Type", "Subtype", "Quality", "Unit mass [kg/m3]",
+        "E modulus [MPa]", "G modulus [MPa]", "Poisson coefficient", "Thermal expansion [1/K]"];
+      const matRows = [matHeaders];
+      // Steel defaults per SAF spec (SI units)
+      const steelDefaults = ["Steel", "", "S 355", 7850, 210000, 80769, 0.3, 1.2e-5];
+      materialsNeeded.forEach(matName => {
+        matRows.push([matName, "Steel", "", matName, 7850, 210000, 80769, 0.3, 1.2e-5]);
+      });
+
+      // ---- Sheet 2: StructuralCrossSection ----
+      const csHeaders = ["Name", "Material", "Cross-section type", "Shape", "Description ID of the profile",
+        "Parameters description", "b [m]", "h [m]", "s [m]", "t [m]"];
+      const csRows = [csHeaders];
+
+      // Map RISA type -> SAF cross-section type
+      const typeToCSType = {
+        "Wide Flange": "I section",
+        "Tube": "Rectangular Hollow",
+        "Channel": "C section",
+        "None": "L section"
+      };
+
+      // Build from section sets first, then fall back to unique type+size combos from members
+      const csAdded = new Set();
+      // From section sets
+      Object.entries(sectionSets).forEach(([setName, { type, size }]) => {
+        const csKey = setName;
+        if (!csAdded.has(csKey)) {
+          csAdded.add(csKey);
+          const mat = typeToMaterial[type] || "Steel";
+          const csType = typeToCSType[type] || "General";
+          csRows.push([setName, mat, csType, size, size, "", "", "", "", ""]);
+        }
+      });
+      // Any members not covered by named sets (section set index -1 = individually sized)
+      members.forEach(m => {
+        const csKey = m.size;
+        if (!csAdded.has(csKey) && m.size && m.size !== "None" && m.size !== "") {
+          csAdded.add(csKey);
+          const mat = typeToMaterial[m.type] || "Steel";
+          const csType = typeToCSType[m.type] || "General";
+          csRows.push([m.size, mat, csType, m.size, m.size, "", "", "", "", ""]);
+        }
+      });
+
+      // ---- Sheet 3: StructuralPointConnection (nodes) ----
+      const nodeHeaders = ["Name", "Coordinate X [m]", "Coordinate Y [m]", "Coordinate Z [m]"];
+      const nodeRows = [nodeHeaders];
+      nodesOrdered.forEach(n => {
+        nodeRows.push([
+          n.label,
+          parseFloat((n.x * FT_TO_M).toFixed(6)),
+          parseFloat((n.y * FT_TO_M).toFixed(6)),
+          parseFloat((n.z * FT_TO_M).toFixed(6))
+        ]);
+      });
+
+      // ---- Sheet 4: StructuralCurveMember (members) ----
+      // Map RISA member type label to SAF type string
+      const memberTypeMap = {
+        "Wide Flange": "Beam",
+        "Tube": "Column",
+        "Channel": "Beam",
+        "None": "Beam"
+      };
+
+      const memberHeaders = ["Name", "Type", "Cross section", "Nodes", "Segments",
+        "Layer", "Member system line", "Member eccentricity ey [m]", "Member eccentricity ez [m]"];
+      const memberRows = [memberHeaders];
+
+      members.forEach(m => {
+        // Resolve cross section reference: prefer named section set, fall back to size
+        let csRef = m.size; // default
+        // Find which section set this member uses by matching size
+        for (const [setName, setData] of Object.entries(sectionSets)) {
+          if (setData.size === m.size && setData.type === m.type) {
+            csRef = setName;
+            break;
+          }
+        }
+        const safType = memberTypeMap[m.type] || "General";
+        const iNode = m.iNode || "?";
+        const jNode = m.jNode || "?";
+        memberRows.push([m.label, safType, csRef, `${iNode}; ${jNode}`, "Line", "", "Centre", 0, 0]);
+      });
+
+      // ---- Sheet 5: StructuralPointSupport (boundary conditions) ----
+      const supportHeaders = ["Name", "Node", "Coordinate system",
+        "Ux", "Uy", "Uz", "Fix"];
+      const supportRows = [supportHeaders];
+
+      boundaryConditions.forEach((bc, i) => {
+        const name = `S${i + 1}`;
+        // SAF uses "Fixed" / "Free" strings for each DOF
+        const ux = bc.tx === 1 ? "Fixed" : "Free";
+        const uy = bc.ty === 1 ? "Fixed" : "Free";
+        const uz = bc.tz === 1 ? "Fixed" : "Free";
+        // "Fix" column: summarize as Pin (tx,ty,tz fixed, rotations free) or Fixed (all fixed)
+        const fix = (bc.tx === 1 && bc.ty === 1 && bc.tz === 1) ? "Fixed" : "Custom";
+        supportRows.push([name, bc.nodeLabel, "Global", ux, uy, uz, fix]);
+      });
+
+      // ---- Sheet 6: NOTES (limitations) ----
+      const notesRows = [
+        ["SAF Export from RISA-3D MCP Server"],
+        ["Generated:", new Date().toISOString()],
+        ["Source file:", filePath],
+        [""],
+        ["IMPORTANT LIMITATIONS"],
+        [""],
+        ["1. UNITS -- Coordinates converted from feet (RISA) to meters (SAF)."],
+        ["   Formula: 1 ft = 0.3048 m. All node coordinates in this file are in meters."],
+        [""],
+        ["2. VERTICAL AXIS -- RISA-3D uses Y as the vertical axis."],
+        ["   SAF and most receiving structural software (SCIA, SOFiSTiK, AxisVM) expect Z as vertical."],
+        ["   This export does NOT swap the Y and Z axes. If you import this file into software"],
+        ["   that requires Z-vertical, you must manually rotate the model 90 degrees about the X-axis"],
+        ["   after import, or change RISA's vertical axis to Z before re-exporting."],
+        ["   RISA itself requires this Y->Z axis change before its own native SAF export."],
+        [""],
+        ["3. CROSS SECTIONS -- Section sizes are exported as-is from RISA designation strings"],
+        ["   (e.g. W14X22, HSS4X4X4). The receiving software must recognize these AISC shape names."],
+        ["   European software may require manual remapping to local section libraries."],
+        [""],
+        ["4. MEMBER TYPES -- Without confirmed Member Type data (Beam/Column/VBrace/HBrace),"],
+        ["   member types are inferred from shape category only (Wide Flange=Beam, Tube=Column, etc.)"],
+        ["   and may need manual correction in the receiving software."],
+        [""],
+        ["5. LOADS -- Load data is not included in this export. SAF supports load transfer"],
+        ["   but RISA's load format requires additional parsing not yet implemented."],
+      ];
+
+      // ---- Write workbook ----
+      const wb = XLSX.utils.book_new();
+
+      const addSheet = (data, name) => {
+        const ws = XLSX.utils.aoa_to_sheet(data);
+        // Bold header row style (best effort -- xlsx package has limited style support)
+        XLSX.utils.book_append_sheet(wb, ws, name);
+      };
+
+      addSheet(matRows, "StructuralMaterial");
+      addSheet(csRows, "StructuralCrossSection");
+      addSheet(nodeRows, "StructuralPointConnection");
+      addSheet(memberRows, "StructuralCurveMember");
+      if (supportRows.length > 1) {
+        addSheet(supportRows, "StructuralPointSupport");
+      }
+      addSheet(notesRows, "NOTES");
+
+      XLSX.writeFile(wb, outputPath);
+
+      const summary = [
+        `SAF export saved to: ${outputPath}`,
+        ``,
+        `Sheets written:`,
+        `  StructuralMaterial:        ${matRows.length - 1} material(s)`,
+        `  StructuralCrossSection:    ${csRows.length - 1} cross-section(s)`,
+        `  StructuralPointConnection: ${nodeRows.length - 1} node(s)`,
+        `  StructuralCurveMember:     ${memberRows.length - 1} member(s)`,
+        `  StructuralPointSupport:    ${supportRows.length - 1} support(s)`,
+        `  NOTES:                     See limitations sheet`,
+        ``,
+        `LIMITATIONS (see NOTES sheet for full details):`,
+        `  - Coordinates converted from feet to meters (x0.3048)`,
+        `  - RISA uses Y-vertical; SAF receivers expect Z-vertical -- axes NOT swapped`,
+        `  - Loads not included in this export`,
+        `  - Section names exported as AISC designations; may need remapping in European software`
+      ].join("\n");
+
+      return { content: [{ type: "text", text: summary }] };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
