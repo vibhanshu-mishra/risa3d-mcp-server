@@ -1,4 +1,4 @@
-# RISA-3D MCP Server
+# RISA-3D MCP Server + CLI Toolkit
 
 > Connect Claude AI to your RISA-3D structural models using the Model Context Protocol (MCP).
 
