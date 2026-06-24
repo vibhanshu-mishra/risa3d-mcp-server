@@ -4,85 +4,23 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 
+import {
+  tokenize,
+  clean,
+  cleanSemi,
+  parseBasicLoadCases,
+  getBasicLoadCaseName,
+  buildBasicLoadCaseHelpers,
+  parseLoadsByBasicLoadCase,
+  parseNodesOrdered,
+  parseMembersResolved,
+  distance3D
+} from "./risa-core.js";
+
 const server = new McpServer({
   name: "risa3d-mcp",
   version: "1.0.0"
 });
-
-// ---- Helpers ----
-
-// Quote-aware tokenizer: treats anything inside "..." (including internal
-// spaces from RISA's fixed-width padding) as a single token.
-function tokenize(line) {
-  const tokens = [];
-  let i = 0;
-  const len = line.length;
-  while (i < len) {
-    while (i < len && /\s/.test(line[i])) i++;
-    if (i >= len) break;
-    if (line[i] === '"') {
-      let j = i + 1;
-      while (j < len && line[j] !== '"') j++;
-      tokens.push(line.substring(i, j + 1));
-      i = j + 1;
-    } else {
-      let j = i;
-      while (j < len && !/\s/.test(line[j])) j++;
-      tokens.push(line.substring(i, j));
-      i = j;
-    }
-  }
-  return tokens;
-}
-
-// Strips quotes and trims padding whitespace from a token
-function clean(token) {
-  return (token || "").replace(/"/g, "").trim();
-}
-
-// Parses the [NODES] section into an ORDERED array (order matters - members
-// reference nodes by their 1-based position in this list, not by label).
-function parseNodesOrdered(content) {
-  const match = content.match(/\[NODES\] <\d+>([\s\S]*?)\[END_NODES\]/);
-  if (!match) return [];
-  return match[1].trim().split("\n").filter(l => l.trim()).map(line => {
-    const t = tokenize(line);
-    return { label: clean(t[0]), x: parseFloat(t[1]), y: parseFloat(t[2]), z: parseFloat(t[3]) };
-  });
-}
-
-// Parses [.MEMBERS_MAIN_DATA] and resolves i/j node indices to labels + coords
-// using the ordered node list. Member line format:
-//   Label, Type(category), Size, iNodeIndex(1-based), jNodeIndex(1-based), ...
-function parseMembersResolved(content, nodesOrdered) {
-  const match = content.match(/\[\.MEMBERS_MAIN_DATA\] <\d+>([\s\S]*?)\[\.END_MEMBERS_MAIN_DATA\]/);
-  if (!match) return [];
-  return match[1].trim().split("\n").filter(l => l.trim()).map(line => {
-    const t = tokenize(line);
-    const label = clean(t[0]);
-    const type = clean(t[1]);
-    const size = clean(t[2]);
-    const iIdx = parseInt(t[3], 10);
-    const jIdx = parseInt(t[4], 10);
-    const iNodeObj = nodesOrdered[iIdx - 1];
-    const jNodeObj = nodesOrdered[jIdx - 1];
-    return {
-      label, type, size,
-      iNodeIndex: iIdx,
-      jNodeIndex: jIdx,
-      iNode: iNodeObj ? iNodeObj.label : null,
-      jNode: jNodeObj ? jNodeObj.label : null,
-      iCoord: iNodeObj || null,
-      jCoord: jNodeObj || null
-    };
-  });
-}
-
-function distance3D(a, b) {
-  if (!a || !b) return null;
-  const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
 
 // Tool 1: Read and summarize a .r3d file
 server.tool(
@@ -575,188 +513,123 @@ server.tool(
   }
 );
 
-// Tool 12: Summarize model for report/calculation package
-// Single call replacing 6+ separate tool calls.
-// Sections covered: project info, nodes, members, section sets, materials,
-// boundary conditions, load combos, area loads, distributed loads, point loads.
-// NOTE: Load case indices in load sections (e.g. 86, 88, 89, 90) are internal
-// RISA IDs. This tool builds a map from BASIC_LOAD_CASES (user-visible names)
-// and attempts to match — unmatched IDs are shown as LC{n}.
+// Tool 12: Summarize model for report
 server.tool(
   "summarize_model_for_report",
-  { filePath: z.string().describe("Full path to the .r3d file") },
+  {
+    filePath: z.string().describe("Full path to the .r3d file")
+  },
   async ({ filePath }) => {
     try {
       const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+      const parsedLoads = parseLoadsByBasicLoadCase(content);
+
       const report = [];
 
-      // ---- PROJECT INFO ----
-      const titleMatch = content.match(/\[\.\.MODEL_TITLE\] <1>\s*\n([^\n]+)/);
-      const companyMatch = content.match(/\[\.\.COMPANY_NAME\] <1>\s*\n([^\n]+)/);
-      const designerMatch = content.match(/\[\.\.DESIGNER_NAME\] <1>\s*\n([^\n]+)/);
-      report.push("=== PROJECT ===");
-      report.push(`Title: ${titleMatch ? clean(titleMatch[1]) : "Unknown"}`);
-      report.push(`Company: ${companyMatch ? clean(companyMatch[1]) : "Unknown"}`);
-      report.push(`Designer: ${designerMatch ? clean(designerMatch[1]) : "Unknown"}`);
+      report.push("MODEL REPORT SUMMARY");
+      report.push(`File: ${filePath}`);
+      report.push(`Nodes: ${nodesOrdered.length}`);
+      report.push(`Members: ${members.length}`);
 
-      // ---- NODES ----
-      const nodesOrdered = parseNodesOrdered(content);
-      report.push(`\n=== NODES (${nodesOrdered.length} total) ===`);
-      const nodeCSV = ["Label,X,Y,Z"];
-      nodesOrdered.forEach(n => nodeCSV.push(`${n.label},${n.x},${n.y},${n.z}`));
-      report.push(nodeCSV.join("\n"));
+      report.push("\n=== LOAD TABLE CHECK ===");
+      report.push(`Distributed loads: ${parsedLoads.totals.consumedDistributedLoads} / ${parsedLoads.totals.distributedLoads}`);
+      report.push(`Area loads: ${parsedLoads.totals.consumedAreaLoads} / ${parsedLoads.totals.areaLoads}`);
+      report.push(`Node loads: ${parsedLoads.totals.consumedNodeLoads} / ${parsedLoads.totals.nodeLoads}`);
 
-      // ---- MEMBERS ----
-      const members = parseMembersResolved(content, nodesOrdered);
-      const typeCounts = {};
-      members.forEach(m => { typeCounts[m.type] = (typeCounts[m.type] || 0) + 1; });
-      const breakdown = Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).map(([t,c]) => `${c} ${t}`).join(", ");
-      report.push(`\n=== MEMBERS (${members.length} total: ${breakdown}) ===`);
-      const memberCSV = ["Label,Type,Size,iNode,jNode,Length(ft)"];
-      members.forEach(m => {
-        const len = distance3D(m.iCoord, m.jCoord);
-        memberCSV.push(`${m.label},${m.type},${m.size},${m.iNode||"?"},${m.jNode||"?"},${len!==null?len.toFixed(2):"N/A"}`);
+      parsedLoads.cases.forEach(blc => {
+        const isTransient = blc.name.toLowerCase().includes("transient area loads");
+
+        report.push(`\n=== BLC ${blc.index}: ${blc.name} ===`);
+
+        if (isTransient) {
+          report.push(`Generated transient load case. Distributed: ${blc.distributedLoads.length}, Area: ${blc.areaLoads.length}, Node: ${blc.nodeLoads.length}`);
+          return;
+        }
+
+        report.push(`Distributed loads: ${blc.distributedLoads.length}`);
+        report.push(`Area loads: ${blc.areaLoads.length}`);
+        report.push(`Node loads: ${blc.nodeLoads.length}`);
+
+        if (blc.areaLoads.length > 0) {
+          report.push("\nArea Loads:");
+          report.push("Row,Corners,Direction,Magnitude");
+
+          blc.areaLoads.forEach(load => {
+            const p = load.tokens;
+
+            const corners = [0, 1, 2, 3].map(i => {
+              const node = nodesOrdered[parseInt(p[i], 10) - 1];
+              return node ? node.label : `(idx ${p[i]})`;
+            }).join("-");
+
+            const dirCode = parseInt(p[5], 10);
+            const direction =
+              dirCode === 1 ? "Y / Gravity" :
+              dirCode === 2 ? "Z" :
+              dirCode === 3 ? "X" :
+              `Dir${dirCode}`;
+
+            report.push([
+              load.rowNumber,
+              corners,
+              direction,
+              parseFloat(p[6])
+            ].join(","));
+          });
+        }
+
+        if (blc.distributedLoads.length > 0) {
+          report.push("\nMember Distributed Loads:");
+          report.push("Row,Member,StartMag,EndMag,StartLoc,EndLoc");
+
+          blc.distributedLoads.forEach(load => {
+            const p = load.tokens;
+            const memberIdx = parseInt(p[0], 10);
+            const member = members[memberIdx - 1];
+
+            report.push([
+              load.rowNumber,
+              member ? member.label : `(idx ${memberIdx})`,
+              parseFloat(p[2]),
+              parseFloat(p[3]),
+              parseFloat(p[4]),
+              parseFloat(p[5])
+            ].join(","));
+          });
+        }
+
+        if (blc.nodeLoads.length > 0) {
+          report.push("\nNode Loads:");
+          report.push("Row,Node,Magnitude,DirectionCode");
+
+          blc.nodeLoads.forEach(load => {
+            const p = load.tokens;
+            const nodeIdx = parseInt(p[0], 10);
+            const node = nodesOrdered[nodeIdx - 1];
+
+            report.push([
+              load.rowNumber,
+              node ? node.label : `(idx ${nodeIdx})`,
+              parseFloat(p[2]),
+              p[3]
+            ].join(","));
+          });
+        }
       });
-      report.push(memberCSV.join("\n"));
-
-      // ---- SECTION SETS ----
-      const setsMatch = content.match(/\[\.HR_STEEL_SECTION_SETS\] <\d+>([\s\S]*?)\[\.END_HR_STEEL_SECTION_SETS\]/);
-      report.push(`\n=== SECTION SETS ===`);
-      if (setsMatch) {
-        report.push("SetName,Type,Size");
-        setsMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-          const t = tokenize(line);
-          report.push(`${clean(t[0])},${clean(t[1])},${clean(t[2])}`);
-        });
-      } else { report.push("None found."); }
-
-      // ---- STEEL MATERIALS ----
-      const hrMatch = content.match(/\[\.HR_STEEL_MATERIAL\] <\d+>([\s\S]*?)\[\.END_HR_STEEL_MATERIAL\]/);
-      report.push(`\n=== STEEL MATERIALS ===`);
-      if (hrMatch) {
-        report.push("Grade,E(ksi),Fy(ksi),Fu(ksi)");
-        hrMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-          const t = tokenize(line);
-          report.push(`${clean(t[0])},${parseFloat(t[1])},${parseFloat(t[6])},${parseFloat(t[9])}`);
-        });
-      } else { report.push("None found."); }
-
-      // ---- BOUNDARY CONDITIONS ----
-      const bcMatch = content.match(/\[BOUNDARY_CONDITIONS\] <\d+>([\s\S]*?)\[END_BOUNDARY_CONDITIONS\]/);
-      report.push(`\n=== BOUNDARY CONDITIONS ===`);
-      if (bcMatch) {
-        const codeLabel = c => ({4:"Fixed",0:"Free",1:"Spring",2:"Slave",3:"Reaction"}[parseInt(c)] || `Code${c}`);
-        report.push("NodeLabel,X,Y,Z,RotX,RotY,RotZ,Description");
-        bcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-          const parts = line.trim().split(/\s+/);
-          const nodeIdx = parseInt(parts[0]);
-          const nodeLabel = nodesOrdered[nodeIdx-1] ? nodesOrdered[nodeIdx-1].label : `(idx ${nodeIdx})`;
-          const x=codeLabel(parts[1]),y=codeLabel(parts[2]),z=codeLabel(parts[3]);
-          const rx=codeLabel(parts[4]),ry=codeLabel(parts[5]),rz=codeLabel(parts[6]);
-          const allFixed = [x,y,z,rx,ry,rz].every(v=>v==="Fixed");
-          const transFixed = [x,y,z].every(v=>v==="Fixed");
-          const rotFree = [rx,ry,rz].every(v=>v==="Free");
-          const desc = allFixed ? "Fixed" : (transFixed&&rotFree ? "Pinned" : `${x}/${y}/${z}|${rx}/${ry}/${rz}`);
-          report.push(`${nodeLabel},${x},${y},${z},${rx},${ry},${rz},${desc}`);
-        });
-      } else { report.push("None found."); }
-
-      // ---- LOAD COMBINATIONS ----
-      const lcMatch = content.match(/\[LOAD_COMBINATIONS\] <\d+>([\s\S]*?)\[END_LOAD_COMBINATIONS\]/);
-      report.push(`\n=== LOAD COMBINATIONS ===`);
-      if (lcMatch) {
-        const lcLines = lcMatch[1].trim().split("\n").filter(l => l.trim());
-        const lcNames = lcLines.map(line => clean(tokenize(line)[0])).filter(n => n);
-        report.push(`Total: ${lcNames.length}`);
-        report.push(lcNames.join("\n"));
-      } else { report.push("None found."); }
-
-      // ---- BASIC LOAD CASES (for resolving internal load case IDs) ----
-      // Format: index "Name" ...
-      const blcMatch = content.match(/\[BASIC_LOAD_CASES\] <\d+>([\s\S]*?)\[END_BASIC_LOAD_CASES\]/);
-      const blcMap = {}; // 1-based index -> name
-      if (blcMatch) {
-        blcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-          const t = tokenize(line);
-          const idx = parseInt(t[0]);
-          const name = clean(t[1]);
-          if (!isNaN(idx) && name) blcMap[idx] = name;
-        });
-      }
-      const lcName = (idx) => blcMap[idx] ? blcMap[idx] : `LC${idx}`;
-
-      // ---- AREA LOADS ----
-      // Format: n1 n2 n3 n4 lcIdx direction magnitude ...
-      // direction: 1=Y(gravity down), 2=Z, 3=X
-      const areaMatch = content.match(/\[AREA_LOADS\] <\d+>([\s\S]*?)\[END_AREA_LOADS\]/);
-      report.push(`\n=== AREA LOADS ===`);
-      if (areaMatch) {
-        const areaLines = areaMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push("Corners(N1-N2-N3-N4),LoadCase,Direction,Magnitude(ksf)");
-        areaLines.forEach(line => {
-          const parts = line.trim().replace(";","").split(/\s+/);
-          const corners = [0,1,2,3].map(i => {
-            const n = nodesOrdered[parseInt(parts[i])-1];
-            return n ? n.label : `(idx ${parts[i]})`;
-          }).join("-");
-          const lc = lcName(parseInt(parts[4]));
-          const dirCode = parseInt(parts[5]);
-          const dir = dirCode === 1 ? "Y(gravity)" : dirCode === 2 ? "Z" : dirCode === 3 ? "X" : `Dir${dirCode}`;
-          const mag = parseFloat(parts[6]);
-          report.push(`${corners},${lc},${dir},${mag}`);
-        });
-      } else { report.push("None found."); }
-
-      // ---- MEMBER DISTRIBUTED LOADS ----
-      // Format: memberIdx lcIdx startMag endMag startLoc endLoc direction ...
-      // memberIdx is 1-based positional index into members list
-      const distMatch = content.match(/\[DIRECT_DISTRIBUTED_LOADS\] <\d+>([\s\S]*?)\[END_DIRECT_DISTRIBUTED_LOADS\]/);
-      report.push(`\n=== MEMBER DISTRIBUTED LOADS ===`);
-      if (distMatch) {
-        const distLines = distMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push("Member,LoadCase,StartMag(k/ft),EndMag(k/ft),StartLoc(ft),EndLoc(ft)");
-        distLines.forEach(line => {
-          const parts = line.trim().replace(";","").split(/\s+/);
-          const mIdx = parseInt(parts[0]);
-          const member = members[mIdx-1];
-          const mLabel = member ? member.label : `(idx ${mIdx})`;
-          const lc = lcName(parseInt(parts[1]));
-          const startMag = parseFloat(parts[2]);
-          const endMag = parseFloat(parts[3]);
-          const startLoc = parseFloat(parts[4]);
-          const endLoc = parseFloat(parts[5]);
-          report.push(`${mLabel},${lc},${startMag},${endMag},${startLoc},${endLoc}`);
-        });
-      } else { report.push("None found."); }
-
-      // ---- POINT / NODE LOADS ----
-      // Format: nodeIdx lcIdx magnitude direction ...
-      // direction code 76 = appears to be a combined direction flag in RISA
-      const ptMatch = content.match(/\[NODE_LOADS\] <\d+>([\s\S]*?)\[END_NODE_LOADS\]/);
-      report.push(`\n=== POINT LOADS (NODE LOADS) ===`);
-      if (ptMatch) {
-        const ptLines = ptMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push("NodeLabel,LoadCase,Magnitude(k),DirectionCode");
-        ptLines.forEach(line => {
-          const parts = line.trim().replace(";","").split(/\s+/);
-          const nIdx = parseInt(parts[0]);
-          const nodeLabel = nodesOrdered[nIdx-1] ? nodesOrdered[nIdx-1].label : `(idx ${nIdx})`;
-          const lc = lcName(parseInt(parts[1]));
-          const mag = parseFloat(parts[2]);
-          const dir = parts[3]; // direction code (76 = X in RISA seismic convention)
-          report.push(`${nodeLabel},${lc},${mag},Dir${dir}`);
-        });
-      } else { report.push("None found."); }
 
       return {
-        content: [{ type: "text", text: `MODEL REPORT\nFile: ${filePath}\n\n` + report.join("\n") }]
+        content: [{ type: "text", text: report.join("\n") }]
       };
+
     } catch (err) {
-      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
     }
   }
 );
-
 
 // Tool 13: Batch summarize all .r3d files in a folder
 // Returns a CSV table with one row per model -- useful for project-wide QC
@@ -1142,7 +1015,7 @@ server.tool(
 
 // Tool 18: clone_model_with_changes
 // Saves a copy of a .r3d model with one or more changes applied.
-// Supported changes: section sizes, boundary conditions, load magnitudes.
+// Supported changes: section sizes, boundary conditions, member distributed load magnitudes, node load magnitudes.
 // NEVER overwrites the original file.
 server.tool(
   "clone_model_with_changes",
@@ -1169,16 +1042,27 @@ server.tool(
 
       loadMagnitudes: z.array(z.object({
         memberLabel: z.string().describe("Member label e.g. M41"),
-        loadCaseName: z.string().describe("Load case name e.g. DL, LL, ELx"),
+        loadCaseName: z.string().describe("Basic load case name e.g. DL, LL, WLx, WLz"),
         newStartMag: z.number().describe("New start magnitude (k/ft, negative = downward)"),
         newEndMag: z.number().optional().describe("New end magnitude -- defaults to same as newStartMag")
-      })).optional().describe("Member distributed load magnitude changes")
+      })).optional().describe("Member distributed load magnitude changes"),
+
+      nodeLoads: z.array(z.object({
+        nodeLabel: z.string().describe("Node label e.g. N17"),
+        loadCaseName: z.string().describe("Basic load case name e.g. DL, LL, WLx, WLz"),
+        newMagnitude: z.number().describe("New node load magnitude")
+      })).optional().describe("Node load magnitude changes")
     }).describe("Changes to apply to the cloned model")
   },
   async ({ filePath, outputPath, changes }) => {
     try {
       if (filePath.toLowerCase() === outputPath.toLowerCase()) {
-        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+        return {
+          content: [{
+            type: "text",
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
+          }]
+        };
       }
 
       let fileContent = fs.readFileSync(filePath, "utf8");
@@ -1198,9 +1082,13 @@ server.tool(
                 const t = tokenize(line);
                 if (!t || t.length < 3) return line;
                 if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
-                if (clean(t[2]) === sc.oldSize) { setsChanged++; return replaceQuotedField(line, sc.oldSize, sc.newSize); }
+                if (clean(t[2]) === sc.oldSize) {
+                  setsChanged++;
+                  return replaceQuotedField(line, sc.oldSize, sc.newSize);
+                }
                 return line;
               }).join("\n");
+
               fileContent = fileContent.replace(setsMatch[2], newBlock);
             }
           }
@@ -1213,9 +1101,13 @@ server.tool(
                 const t = tokenize(line);
                 if (!t || t.length < 3) return line;
                 if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
-                if (clean(t[2]) === sc.oldSize) { membersChanged++; return replaceQuotedField(line, sc.oldSize, sc.newSize); }
+                if (clean(t[2]) === sc.oldSize) {
+                  membersChanged++;
+                  return replaceQuotedField(line, sc.oldSize, sc.newSize);
+                }
                 return line;
               }).join("\n");
+
               fileContent = fileContent.replace(membersMatch[2], newBlock);
             }
           }
@@ -1226,21 +1118,21 @@ server.tool(
 
       // --- BOUNDARY CONDITION CHANGES ---
       if (changes.boundaryConditions && changes.boundaryConditions.length > 0) {
-        // Code mapping: Fixed=4, Free=0
         const codeMap = { "Fixed": 4, "Free": 0 };
 
         const bcMatch = fileContent.match(/(\[BOUNDARY_CONDITIONS\] <\d+>)([\s\S]*?)(\[END_BOUNDARY_CONDITIONS\])/);
         if (bcMatch) {
-          // Parse existing BC lines into a map: nodeIndex -> line
-          // BC line format: nodeIndex X Y Z RotX RotY RotZ [extra fields]
-          // We need to resolve node label -> node index first
           const nodesOrdered = parseNodesOrdered(fileContent);
           const nodeLabelToIndex = {};
-          nodesOrdered.forEach((n, i) => { nodeLabelToIndex[n.label] = i + 1; }); // 1-based
+          nodesOrdered.forEach((n, i) => {
+            nodeLabelToIndex[n.label] = i + 1;
+          });
 
           let bcBlock = bcMatch[2];
+
           for (const bc of changes.boundaryConditions) {
             const nodeIdx = nodeLabelToIndex[bc.nodeLabel];
+
             if (!nodeIdx) {
               report.push(`BC change: node "${bc.nodeLabel}" not found -- skipped`);
               continue;
@@ -1248,91 +1140,189 @@ server.tool(
 
             const lines = bcBlock.split("\n");
             let found = false;
+
             const newLines = lines.map(line => {
               const t = line.trim().split(/\s+/);
               if (t[0] === String(nodeIdx)) {
                 found = true;
-                // t: [nodeIdx, X, Y, Z, RotX, RotY, RotZ, ...]
-                const parts = line.split(/\s+/);
+
+                const parts = line.trim().replace(";", "").split(/\s+/);
                 if (bc.x !== undefined) parts[1] = String(codeMap[bc.x]);
                 if (bc.y !== undefined) parts[2] = String(codeMap[bc.y]);
                 if (bc.z !== undefined) parts[3] = String(codeMap[bc.z]);
                 if (bc.rotX !== undefined) parts[4] = String(codeMap[bc.rotX]);
                 if (bc.rotY !== undefined) parts[5] = String(codeMap[bc.rotY]);
                 if (bc.rotZ !== undefined) parts[6] = String(codeMap[bc.rotZ]);
-                return parts.join(" ");
+
+                return parts.join(" ") + ";";
               }
+
               return line;
             });
+
             bcBlock = newLines.join("\n");
             report.push(`BC "${bc.nodeLabel}": ${found ? "updated" : "node index found but no matching BC line -- may need to add new BC entry"}`);
           }
+
           fileContent = fileContent.replace(bcMatch[2], bcBlock);
         } else {
           report.push("No BOUNDARY_CONDITIONS section found.");
         }
       }
 
-      // --- LOAD MAGNITUDE CHANGES ---
+      // --- MEMBER DISTRIBUTED LOAD MAGNITUDE CHANGES ---
       if (changes.loadMagnitudes && changes.loadMagnitudes.length > 0) {
-        // Resolve load case name -> internal LC ID
-        const blcMatch = fileContent.match(/\[BASIC_LOAD_CASES\] <\d+>([\s\S]*?)\[END_BASIC_LOAD_CASES\]/);
-        const lcNameToId = {};
-        if (blcMatch) {
-          blcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-            const t = tokenize(line);
-            if (t && t.length >= 2) {
-              // Map both the sequential index and the name
-              lcNameToId[clean(t[1])] = t[0]; // name -> sequential index
-            }
-          });
-        }
+        const nodesOrdered = parseNodesOrdered(fileContent);
+        const members = parseMembersResolved(fileContent, nodesOrdered);
+        const parsedLoads = parseLoadsByBasicLoadCase(fileContent);
 
         const ddlMatch = fileContent.match(/(\[DIRECT_DISTRIBUTED_LOADS\] <\d+>)([\s\S]*?)(\[END_DIRECT_DISTRIBUTED_LOADS\])/);
-        if (ddlMatch) {
-          let ddlBlock = ddlMatch[2];
-          for (const lc of changes.loadMagnitudes) {
-            const endMag = lc.newEndMag !== undefined ? lc.newEndMag : lc.newStartMag;
-            let changed = 0;
-            // DDL line format: memberLabel lcID startMag endMag startLoc endLoc direction
-            const newBlock = ddlBlock.split("\n").map(line => {
-              if (!line.trim()) return line;
-              const t = tokenize(line);
-              if (!t || t.length < 4) return line;
-              const thisLabel = clean(t[0]);
-              if (thisLabel !== lc.memberLabel) return line;
-              // Check load case -- match by name lookup or direct ID
-              const lcId = lcNameToId[lc.loadCaseName];
-              if (lcId && t[1] !== lcId) return line;
-              // Replace start and end magnitudes (fields 2 and 3)
-              changed++;
-              const parts = line.trim().split(/\s+/);
-              parts[2] = lc.newStartMag.toFixed(6);
-              parts[3] = endMag.toFixed(6);
-              return parts.join(" ");
-            }).join("\n");
-            ddlBlock = newBlock;
-            report.push(`Load "${lc.memberLabel}" (${lc.loadCaseName}): magnitudes updated`);
-          }
-          fileContent = fileContent.replace(ddlMatch[2], ddlBlock);
-        } else {
+
+        if (!ddlMatch) {
           report.push("No DIRECT_DISTRIBUTED_LOADS section found.");
+        } else {
+          let ddlLines = ddlMatch[2].split("\n");
+
+          const memberLabelToIndex = {};
+          members.forEach((m, i) => {
+            memberLabelToIndex[m.label] = i + 1;
+          });
+
+          for (const lc of changes.loadMagnitudes) {
+            const memberIdx = memberLabelToIndex[lc.memberLabel];
+            const endMag = lc.newEndMag !== undefined ? lc.newEndMag : lc.newStartMag;
+
+            if (!memberIdx) {
+              report.push(`Load "${lc.memberLabel}" (${lc.loadCaseName}): member not found -- skipped`);
+              continue;
+            }
+
+            const targetCase = parsedLoads.cases.find(c =>
+              c.name.toLowerCase() === lc.loadCaseName.toLowerCase()
+            );
+
+            if (!targetCase) {
+              report.push(`Load "${lc.memberLabel}" (${lc.loadCaseName}): load case not found -- skipped`);
+              continue;
+            }
+
+            let changed = 0;
+
+            targetCase.distributedLoads.forEach(load => {
+              const p = load.tokens;
+              const rowMemberIdx = parseInt(p[0], 10);
+
+              if (rowMemberIdx !== memberIdx) return;
+
+              const rowNumber = load.rowNumber;
+              let seenNonEmpty = 0;
+
+              ddlLines = ddlLines.map(line => {
+                if (!line.trim()) return line;
+
+                seenNonEmpty++;
+
+                if (seenNonEmpty !== rowNumber) return line;
+
+                const parts = line.trim().replace(";", "").split(/\s+/);
+                parts[2] = lc.newStartMag.toFixed(6);
+                parts[3] = endMag.toFixed(6);
+
+                changed++;
+                return parts.join(" ") + ";";
+              });
+            });
+
+            report.push(`Member load "${lc.memberLabel}" (${lc.loadCaseName}): ${changed} distributed load row(s) updated`);
+          }
+
+          fileContent = fileContent.replace(ddlMatch[2], ddlLines.join("\n"));
         }
       }
 
-      // Write new file
+      // --- NODE LOAD MAGNITUDE CHANGES ---
+      if (changes.nodeLoads && changes.nodeLoads.length > 0) {
+        const nodesOrdered = parseNodesOrdered(fileContent);
+        const parsedLoads = parseLoadsByBasicLoadCase(fileContent);
+
+        const nodeLoadMatch = fileContent.match(/(\[NODE_LOADS\] <\d+>)([\s\S]*?)(\[END_NODE_LOADS\])/);
+
+        if (!nodeLoadMatch) {
+          report.push("No NODE_LOADS section found.");
+        } else {
+          let nodeLoadLines = nodeLoadMatch[2].split("\n");
+
+          const nodeLabelToIndex = {};
+          nodesOrdered.forEach((n, i) => {
+            nodeLabelToIndex[n.label] = i + 1;
+          });
+
+          for (const nl of changes.nodeLoads) {
+            const nodeIdx = nodeLabelToIndex[nl.nodeLabel];
+
+            if (!nodeIdx) {
+              report.push(`Node load "${nl.nodeLabel}" (${nl.loadCaseName}): node not found -- skipped`);
+              continue;
+            }
+
+            const targetCase = parsedLoads.cases.find(c =>
+              c.name.toLowerCase() === nl.loadCaseName.toLowerCase()
+            );
+
+            if (!targetCase) {
+              report.push(`Node load "${nl.nodeLabel}" (${nl.loadCaseName}): load case not found -- skipped`);
+              continue;
+            }
+
+            let changed = 0;
+
+            targetCase.nodeLoads.forEach(load => {
+              const p = load.tokens;
+              const rowNodeIdx = parseInt(p[0], 10);
+
+              if (rowNodeIdx !== nodeIdx) return;
+
+              const rowNumber = load.rowNumber;
+              let seenNonEmpty = 0;
+
+              nodeLoadLines = nodeLoadLines.map(line => {
+                if (!line.trim()) return line;
+
+                seenNonEmpty++;
+
+                if (seenNonEmpty !== rowNumber) return line;
+
+                const parts = line.trim().replace(";", "").split(/\s+/);
+                parts[2] = nl.newMagnitude.toFixed(6);
+
+                changed++;
+                return parts.join(" ") + ";";
+              });
+            });
+
+            report.push(`Node load "${nl.nodeLabel}" (${nl.loadCaseName}): ${changed} node load row(s) updated`);
+          }
+
+          fileContent = fileContent.replace(nodeLoadMatch[2], nodeLoadLines.join("\n"));
+        }
+      }
+
       fs.writeFileSync(outputPath, fileContent, "utf8");
+
       report.unshift(`Cloned model saved to: ${outputPath}`);
       report.push(`Original unchanged: ${filePath}`);
 
-      return { content: [{ type: "text", text: report.join("\n") }] };
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
 
     } catch (err) {
-      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
     }
   }
 );
-
 
 // ---- Shape weight lookup (lb/ft) ----
 // AISC standard shapes. For W, C, L shapes the designation number IS the weight per foot.
@@ -2482,134 +2472,321 @@ server.tool(
 server.tool(
   "generate_load_summary",
   {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    includeTransientLoads: z.boolean().optional().default(false)
+      .describe("Include RISA-generated transient area load cases. Default false.")
+  },
+  async ({ filePath, includeTransientLoads = false }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+      const parsed = parseLoadsByBasicLoadCase(content);
+
+      const report = [];
+
+      report.push("LOAD SUMMARY");
+      report.push(`File: ${filePath}`);
+      report.push(`Nodes: ${nodesOrdered.length}`);
+      report.push(`Members: ${members.length}`);
+
+      report.push("\n=== LOAD TABLE CHECK ===");
+      report.push(`Distributed loads: ${parsed.totals.consumedDistributedLoads} / ${parsed.totals.distributedLoads}`);
+      report.push(`Area loads: ${parsed.totals.consumedAreaLoads} / ${parsed.totals.areaLoads}`);
+      report.push(`Node loads: ${parsed.totals.consumedNodeLoads} / ${parsed.totals.nodeLoads}`);
+
+      parsed.cases.forEach(blc => {
+        const isTransient = blc.name.toLowerCase().includes("transient area loads");
+
+        if (isTransient && !includeTransientLoads) {
+          report.push(`\n=== BLC ${blc.index}: ${blc.name} ===`);
+          report.push(`Skipped generated transient loads. Distributed: ${blc.distributedLoads.length}, Area: ${blc.areaLoads.length}, Node: ${blc.nodeLoads.length}`);
+          return;
+        }
+
+        report.push(`\n=== BLC ${blc.index}: ${blc.name} ===`);
+
+        report.push("\nDistributed Loads:");
+        if (blc.distributedLoads.length === 0) {
+          report.push("None");
+        } else {
+          report.push("Row,Member,StartMag,EndMag,StartLoc,EndLoc");
+          blc.distributedLoads.forEach(load => {
+            const p = load.tokens;
+            const memberIdx = parseInt(p[0], 10);
+            const member = members[memberIdx - 1];
+            report.push([
+              load.rowNumber,
+              member ? member.label : `(idx ${memberIdx})`,
+              parseFloat(p[2]),
+              parseFloat(p[3]),
+              parseFloat(p[4]),
+              parseFloat(p[5])
+            ].join(","));
+          });
+        }
+
+        report.push("\nArea Loads:");
+        if (blc.areaLoads.length === 0) {
+          report.push("None");
+        } else {
+          report.push("Row,Corners,DirectionCode,Magnitude");
+          blc.areaLoads.forEach(load => {
+            const p = load.tokens;
+            const corners = [0, 1, 2, 3].map(i => {
+              const node = nodesOrdered[parseInt(p[i], 10) - 1];
+              return node ? node.label : `(idx ${p[i]})`;
+            }).join("-");
+
+            report.push([
+              load.rowNumber,
+              corners,
+              p[5],
+              parseFloat(p[6])
+            ].join(","));
+          });
+        }
+
+        report.push("\nNode Loads:");
+        if (blc.nodeLoads.length === 0) {
+          report.push("None");
+        } else {
+          report.push("Row,Node,Magnitude,DirectionCode");
+          blc.nodeLoads.forEach(load => {
+            const p = load.tokens;
+            const nodeIdx = parseInt(p[0], 10);
+            const node = nodesOrdered[nodeIdx - 1];
+
+            report.push([
+              load.rowNumber,
+              node ? node.label : `(idx ${nodeIdx})`,
+              parseFloat(p[2]),
+              p[3]
+            ].join(","));
+          });
+        }
+      });
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// -----------------------------------------------------
+// TEMP DEBUG TOOLS
+// Used to reverse-engineer RISA load case mapping.
+// Remove after generate_load_summary,
+// clone_model_with_changes,
+// and load-related tools are fully validated.
+// -----------------------------------------------------
+
+// Tool 29: debug_risa_load_structure
+// Temporary diagnostic helper for reverse-engineering RISA-3D load records.
+// Shows raw token positions for BASIC_LOAD_CASES, NODE_LOADS,
+// DIRECT_DISTRIBUTED_LOADS, AREA_LOADS, and LOAD_COMBINATIONS.
+server.tool(
+  "debug_risa_load_structure",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    maxRows: z.number().optional().default(10)
+      .describe("Maximum rows to show per section. Default 10.")
+  },
+  async ({ filePath, maxRows = 10 }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const report = [];
+
+      function debugSection(sectionName, endSectionName, rowLimit = maxRows) {
+        const regex = new RegExp(`\\[${sectionName}\\] <\\d+>([\\s\\S]*?)\\[${endSectionName}\\]`);
+        const match = content.match(regex);
+
+        report.push(`\n=== ${sectionName} ===`);
+
+        if (!match) {
+          report.push("Section not found.");
+          return;
+        }
+
+        const lines = match[1].trim().split("\n").filter(l => l.trim());
+        report.push(`Total rows: ${lines.length}`);
+        report.push(`Showing first ${Math.min(rowLimit, lines.length)} row(s)`);
+
+        lines.slice(0, rowLimit).forEach((line, rowIndex) => {
+          const tokens = tokenize(line.trim().replace(";", ""));
+          report.push(`\nRow ${rowIndex + 1} raw:`);
+          report.push(line.trim());
+
+          tokens.forEach((token, i) => {
+            report.push(`  [${i}] = ${cleanSemi(token)}`);
+          });
+        });
+      }
+
+      debugSection("BASIC_LOAD_CASES", "END_BASIC_LOAD_CASES", maxRows);
+      debugSection("NODE_LOADS", "END_NODE_LOADS", maxRows);
+      debugSection("DIRECT_DISTRIBUTED_LOADS", "END_DIRECT_DISTRIBUTED_LOADS", maxRows);
+      debugSection("AREA_LOADS", "END_AREA_LOADS", maxRows);
+      debugSection("LOAD_COMBINATIONS", "END_LOAD_COMBINATIONS", maxRows);
+
+      return {
+        content: [{
+          type: "text",
+          text: `RISA LOAD STRUCTURE DEBUG\nFile: ${filePath}\n` + report.join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+
+// Tool 30: debug_risa_load_case_counts
+// Temporary diagnostic helper to compare BASIC_LOAD_CASES counts against
+// actual raw load sections. Helps confirm how RISA maps visible BLC names
+// to raw NODE_LOADS, DIRECT_DISTRIBUTED_LOADS, and AREA_LOADS records.
+server.tool(
+  "debug_risa_load_case_counts",
+  {
     filePath: z.string().describe("Full path to the .r3d file")
   },
   async ({ filePath }) => {
     try {
       const content = fs.readFileSync(filePath, "utf8");
+      const blcData = parseBasicLoadCases(content);
 
+      const sectionCount = (sectionName, endSectionName) => {
+        const regex = new RegExp(`\\[${sectionName}\\] <\\d+>([\\s\\S]*?)\\[${endSectionName}\\]`);
+        const match = content.match(regex);
+        if (!match) return 0;
+        return match[1].trim().split("\n").filter(l => l.trim()).length;
+      };
+
+      const nodeLoadCount = sectionCount("NODE_LOADS", "END_NODE_LOADS");
+      const distLoadCount = sectionCount("DIRECT_DISTRIBUTED_LOADS", "END_DIRECT_DISTRIBUTED_LOADS");
+      const areaLoadCount = sectionCount("AREA_LOADS", "END_AREA_LOADS");
+
+      const report = [];
+
+      report.push("RISA LOAD CASE COUNT DEBUG");
+      report.push(`File: ${filePath}`);
+      report.push("");
+      report.push("Actual raw section counts:");
+      report.push(`NODE_LOADS: ${nodeLoadCount}`);
+      report.push(`DIRECT_DISTRIBUTED_LOADS: ${distLoadCount}`);
+      report.push(`AREA_LOADS: ${areaLoadCount}`);
+
+      report.push("\nBASIC_LOAD_CASES token breakdown:");
+      report.push("BLC,Name,Field2,Field3,Field4,Field5,Field6,Field7,Field8,LastField,RawTokenCount");
+
+      Object.values(blcData.byIndex)
+        .sort((a, b) => a.index - b.index)
+        .forEach(blc => {
+          const t = blc.rawTokens || [];
+          report.push([
+            blc.index,
+            blc.name,
+            cleanSemi(t[2]),
+            cleanSemi(t[3]),
+            cleanSemi(t[4]),
+            cleanSemi(t[5]),
+            cleanSemi(t[6]),
+            cleanSemi(t[7]),
+            cleanSemi(t[8]),
+            cleanSemi(t[t.length - 1]),
+            t.length
+          ].join(","));
+        });
+
+      report.push("\nNote:");
+      report.push("This tool does not decide the final mapping.");
+      report.push("It shows the raw counts so we can compare RISA's visible load-case table against the .r3d sections.");
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+
+// Tool 31: debug_risa_member_load_rows
+// Temporary diagnostic helper for clone_model_with_changes.
+// Given a member label, shows every DIRECT_DISTRIBUTED_LOADS row that belongs
+// to that member and labels each token position.
+server.tool(
+  "debug_risa_member_load_rows",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    memberLabel: z.string().describe("Member label to inspect, e.g. M41")
+  },
+  async ({ filePath, memberLabel }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
       const nodesOrdered = parseNodesOrdered(content);
       const members = parseMembersResolved(content, nodesOrdered);
 
-      // Basic load case map
-      const blcMap = {};
-      const blcMatch = content.match(/\[BASIC_LOAD_CASES\] <\d+>([\s\S]*?)\[END_BASIC_LOAD_CASES\]/);
+      const memberIndex = members.findIndex(m => m.label === memberLabel) + 1;
 
-      if (blcMatch) {
-        blcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
-          const t = tokenize(line);
-          const idx = parseInt(t[0], 10);
-          const name = clean(t[1]);
-          if (!isNaN(idx) && name) blcMap[idx] = name;
-        });
+      if (memberIndex <= 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `Member "${memberLabel}" not found.`
+          }]
+        };
       }
 
-      const lcName = (id) => blcMap[id] || `LC${id}`;
-
-      const report = [];
-      report.push(`LOAD SUMMARY`);
-      report.push(`File: ${filePath}`);
-      report.push(`Nodes: ${nodesOrdered.length}`);
-      report.push(`Members: ${members.length}`);
-
-      // ---- BASIC LOAD CASES ----
-      report.push(`\n=== BASIC LOAD CASES ===`);
-      if (Object.keys(blcMap).length === 0) {
-        report.push("None found.");
-      } else {
-        report.push("ID,Name");
-        Object.entries(blcMap).forEach(([id, name]) => {
-          report.push(`${id},${name}`);
-        });
-      }
-
-      // ---- AREA LOADS ----
-      const areaMatch = content.match(/\[AREA_LOADS\] <\d+>([\s\S]*?)\[END_AREA_LOADS\]/);
-      report.push(`\n=== AREA LOADS ===`);
-
-      if (!areaMatch) {
-        report.push("None found.");
-      } else {
-        const lines = areaMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push(`Total area loads: ${lines.length}`);
-        report.push("Corners,LoadCase,Direction,Magnitude");
-
-        lines.forEach(line => {
-          const parts = line.trim().replace(";", "").split(/\s+/);
-
-          const corners = [0, 1, 2, 3].map(i => {
-            const node = nodesOrdered[parseInt(parts[i], 10) - 1];
-            return node ? node.label : `(idx ${parts[i]})`;
-          }).join("-");
-
-          const loadCase = lcName(parseInt(parts[4], 10));
-
-          const dirCode = parseInt(parts[5], 10);
-          const direction =
-            dirCode === 1 ? "Y / Gravity" :
-            dirCode === 2 ? "Z" :
-            dirCode === 3 ? "X" :
-            `Dir${dirCode}`;
-
-          const magnitude = parseFloat(parts[6]);
-
-          report.push(`${corners},${loadCase},${direction},${magnitude}`);
-        });
-      }
-
-      // ---- MEMBER DISTRIBUTED LOADS ----
       const distMatch = content.match(/\[DIRECT_DISTRIBUTED_LOADS\] <\d+>([\s\S]*?)\[END_DIRECT_DISTRIBUTED_LOADS\]/);
-      report.push(`\n=== MEMBER DISTRIBUTED LOADS ===`);
 
       if (!distMatch) {
-        report.push("None found.");
-      } else {
-        const lines = distMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push(`Total distributed loads: ${lines.length}`);
-        report.push("Member,LoadCase,StartMag,EndMag,StartLoc,EndLoc");
-
-        lines.forEach(line => {
-          const parts = line.trim().replace(";", "").split(/\s+/);
-
-          const memberIdx = parseInt(parts[0], 10);
-          const member = members[memberIdx - 1];
-          const memberLabel = member ? member.label : `(idx ${memberIdx})`;
-
-          const loadCase = lcName(parseInt(parts[1], 10));
-          const startMag = parseFloat(parts[2]);
-          const endMag = parseFloat(parts[3]);
-          const startLoc = parseFloat(parts[4]);
-          const endLoc = parseFloat(parts[5]);
-
-          report.push(`${memberLabel},${loadCase},${startMag},${endMag},${startLoc},${endLoc}`);
-        });
+        return {
+          content: [{
+            type: "text",
+            text: "No DIRECT_DISTRIBUTED_LOADS section found."
+          }]
+        };
       }
 
-      // ---- NODE LOADS / POINT LOADS ----
-      const nodeLoadMatch = content.match(/\[NODE_LOADS\] <\d+>([\s\S]*?)\[END_NODE_LOADS\]/);
-      report.push(`\n=== POINT LOADS / NODE LOADS ===`);
+      const lines = distMatch[1].trim().split("\n").filter(l => l.trim());
+      const matched = lines.filter(line => {
+        const parts = line.trim().replace(";", "").split(/\s+/);
+        return parseInt(parts[0], 10) === memberIndex;
+      });
 
-      if (!nodeLoadMatch) {
-        report.push("None found.");
-      } else {
-        const lines = nodeLoadMatch[1].trim().split("\n").filter(l => l.trim());
-        report.push(`Total node loads: ${lines.length}`);
-        report.push("Node,LoadCase,Magnitude,DirectionCode");
+      const report = [];
 
-        lines.forEach(line => {
-          const parts = line.trim().replace(";", "").split(/\s+/);
+      report.push("RISA MEMBER LOAD ROW DEBUG");
+      report.push(`File: ${filePath}`);
+      report.push(`Member label: ${memberLabel}`);
+      report.push(`Member positional index: ${memberIndex}`);
+      report.push(`Matching distributed load rows: ${matched.length}`);
 
-          const nodeIdx = parseInt(parts[0], 10);
-          const node = nodesOrdered[nodeIdx - 1];
-          const nodeLabel = node ? node.label : `(idx ${nodeIdx})`;
+      matched.forEach((line, rowIndex) => {
+        const tokens = tokenize(line.trim().replace(";", ""));
 
-          const loadCase = lcName(parseInt(parts[1], 10));
-          const magnitude = parseFloat(parts[2]);
-          const directionCode = parts[3];
+        report.push(`\nMatched Row ${rowIndex + 1} raw:`);
+        report.push(line.trim());
 
-          report.push(`${nodeLabel},${loadCase},${magnitude},Dir${directionCode}`);
+        tokens.forEach((token, i) => {
+          report.push(`  [${i}] = ${cleanSemi(token)}`);
         });
-      }
+      });
 
       return {
         content: [{ type: "text", text: report.join("\n") }]
