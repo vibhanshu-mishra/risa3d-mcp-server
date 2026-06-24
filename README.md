@@ -25,6 +25,33 @@ No RISA-3D API is required. This works by reading RISA-3D's plain-text `.r3d` fi
 
 ---
 
+## Project Structure
+
+```text
+risa3d-mcp-server/
+  index.js        # MCP server tools for Claude/Desktop MCP clients
+  risa-core.js    # Shared RISA-3D parsing helpers
+  risa-cli.js     # Local command-line testing/debugging
+  package.json
+```
+
+---
+
+## What This Server Does
+
+This MCP server reads and modifies `.r3d` RISA-3D model files.
+It can:
+
+- Read nodes, members, sections, supports, load cases, and load combinations
+- Generate model summaries
+- Generate load summaries grouped by RISA basic load case
+- Export member schedules to Excel
+- Clone a model with controlled changes
+- Run QA/QC checks on RISA models
+- Run CLI diagnostics without Claude/MCP
+
+---
+
 ## What You Can Do
 
 Once connected, you can ask Claude things like:
@@ -327,7 +354,176 @@ revised: "C:\path\to\model-v2.r3d"
 | `find_duplicate_nodes` | Scans all nodes for pairs with nearly identical coordinates (default tolerance 0.001 ft, ~0.3mm). Duplicate nodes cause members to appear connected when they aren't, or produce zero-length members that silently corrupt analysis results. Flags pairs by label with exact distance and coordinates. |
 | `replace_section_size_in_folder` | Replaces a section size string across every `.r3d` file in a folder, saving each as a new file with a configurable suffix (never overwrites originals). Useful for applying a spec change across an entire project folder at once. Reports how many replacements were made per file, and skips files with no matches. |
 | `compare_risa_models` | Diffs two `.r3d` files and reports exactly what changed: nodes added, removed, or moved; members added, removed, or changed (size, type, or connectivity); section sets added, removed, or resized; and load combination count changes. Useful for tracking design iterations and documenting changes between submittals. |
-| `generate_load_summary` | Converts RISA's internal load records into a readable summary showing: Basic Load Cases, Area Loads, Member Distributed Loads, Node (Point) Loads |
+
+---
+
+## Important RISA-3D Load Parsing Note
+
+RISA-3D `.r3d` files do not always store visible load case names directly inside load rows. For example, load rows may contain internal raw IDs like:
+
+```text
+88
+89
+90
+```
+
+These are not necessarily the visible Basic Load Case numbers shown in RISA.
+
+This project resolves loads using the confirmed RISA pattern:
+
+```text
+[BASIC_LOAD_CASES]
+  -> distributed load count
+  -> area load count
+  -> node load count
+  -> row order inside load tables
+```
+
+The shared helper `parseLoadsByBasicLoadCase(content)` groups loads by visible RISA Basic Load Case name, such as:
+
+```text
+DL
+LL
+WLx
+WLz
+BLC 1 Transient Area Loads
+```
+
+instead of exposing internal raw IDs.
+
+---
+
+## Current Load Editing Support
+
+`clone_model_with_changes` currently supports:
+
+- Section size changes
+- Boundary condition changes
+- Member distributed load magnitude changes
+- Node load magnitude changes
+
+It does **not** currently edit area loads.
+
+Area loads are intentionally excluded because RISA may generate transient/memberized distributed loads from area loads. Editing area loads without regenerating those derived loads could create an inconsistent model.
+
+---
+
+## CLI Usage
+
+The CLI lives in `risa-cli.js`. Run commands from the project folder:
+
+```cmd
+node risa-cli.js help
+```
+
+### Generate Load Summary
+
+```cmd
+node risa-cli.js generate-load-summary "C:\path\to\model.r3d"
+```
+
+Include generated transient load cases:
+
+```cmd
+node risa-cli.js generate-load-summary "C:\path\to\model.r3d" --include-transient
+```
+
+### Debug Load Case Counts
+
+```cmd
+node risa-cli.js debug-load-case-counts "C:\path\to\model.r3d"
+```
+
+### Debug Raw Load Structure
+
+```cmd
+node risa-cli.js debug-load-structure "C:\path\to\model.r3d" 10
+```
+
+### Debug Member Load Rows
+
+```cmd
+node risa-cli.js debug-member-load-rows "C:\path\to\model.r3d" M41
+```
+
+### Debug Load Membership
+
+```cmd
+node risa-cli.js debug-load-membership "C:\path\to\model.r3d"
+```
+
+---
+
+## MCP Usage
+
+Start the MCP server with:
+
+```cmd
+node index.js
+```
+
+In your MCP client config, point to:
+
+```cmd
+node C:\path\to\risa3d-mcp-server\index.js
+```
+
+---
+
+## Safety Notes
+
+- The server never overwrites the original file when cloning.
+- Use `clone_model_with_changes` with a different `outputPath`.
+- Always open cloned `.r3d` files in RISA-3D and verify the model before using them for design.
+- Write/edit tools should be treated as engineering-assist tools, not final design authority.
+
+---
+
+## Developer Checks
+
+Before committing changes, run:
+
+```cmd
+node --check index.js
+node --check risa-core.js
+node --check risa-cli.js
+```
+
+---
+
+## Recommended GitHub Files
+
+Do commit:
+
+```text
+index.js
+risa-core.js
+risa-cli.js
+package.json
+README.md
+```
+
+Do not commit:
+
+```text
+*.r3d
+*.xlsx
+node_modules/
+temporary test models
+client project files
+```
+
+Add this to `.gitignore`:
+
+```gitignore
+node_modules/
+*.r3d
+*.xlsx
+*.xls
+*.csv
+.DS_Store
+.env
+```
 
 ---
 
@@ -368,7 +564,7 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 - [x] Get basic load cases with load type classification
 - [x] Find all members using a specific section size
 - [x] Get deflection limit rules (global and per-member)
-- [x] Modify member section sizes and save updated model
+- [x] Modify member section sizes and save the updated model
 - [x] Clone a model with section, boundary condition, and load changes applied
 - [x] Material takeoff with AISC shape weights
 - [x] Length-based screen for unbraced length review
@@ -378,7 +574,6 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 - [x] Detect duplicate nodes (coordinate tolerance scan)
 - [x] Replace section size globally across a folder of models
 - [x] Diff two model versions (nodes, members, section sets, load combinations)
-- [x] Generate load summary (basic load cases, Area Loads, Member Distributed Loads, Node (Point) Loads)
 
 ---
 
