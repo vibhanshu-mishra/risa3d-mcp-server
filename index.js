@@ -2478,5 +2478,150 @@ server.tool(
   }
 );
 
+// Tool 28: generate_load_summary
+server.tool(
+  "generate_load_summary",
+  {
+    filePath: z.string().describe("Full path to the .r3d file")
+  },
+  async ({ filePath }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      // Basic load case map
+      const blcMap = {};
+      const blcMatch = content.match(/\[BASIC_LOAD_CASES\] <\d+>([\s\S]*?)\[END_BASIC_LOAD_CASES\]/);
+
+      if (blcMatch) {
+        blcMatch[1].trim().split("\n").filter(l => l.trim()).forEach(line => {
+          const t = tokenize(line);
+          const idx = parseInt(t[0], 10);
+          const name = clean(t[1]);
+          if (!isNaN(idx) && name) blcMap[idx] = name;
+        });
+      }
+
+      const lcName = (id) => blcMap[id] || `LC${id}`;
+
+      const report = [];
+      report.push(`LOAD SUMMARY`);
+      report.push(`File: ${filePath}`);
+      report.push(`Nodes: ${nodesOrdered.length}`);
+      report.push(`Members: ${members.length}`);
+
+      // ---- BASIC LOAD CASES ----
+      report.push(`\n=== BASIC LOAD CASES ===`);
+      if (Object.keys(blcMap).length === 0) {
+        report.push("None found.");
+      } else {
+        report.push("ID,Name");
+        Object.entries(blcMap).forEach(([id, name]) => {
+          report.push(`${id},${name}`);
+        });
+      }
+
+      // ---- AREA LOADS ----
+      const areaMatch = content.match(/\[AREA_LOADS\] <\d+>([\s\S]*?)\[END_AREA_LOADS\]/);
+      report.push(`\n=== AREA LOADS ===`);
+
+      if (!areaMatch) {
+        report.push("None found.");
+      } else {
+        const lines = areaMatch[1].trim().split("\n").filter(l => l.trim());
+        report.push(`Total area loads: ${lines.length}`);
+        report.push("Corners,LoadCase,Direction,Magnitude");
+
+        lines.forEach(line => {
+          const parts = line.trim().replace(";", "").split(/\s+/);
+
+          const corners = [0, 1, 2, 3].map(i => {
+            const node = nodesOrdered[parseInt(parts[i], 10) - 1];
+            return node ? node.label : `(idx ${parts[i]})`;
+          }).join("-");
+
+          const loadCase = lcName(parseInt(parts[4], 10));
+
+          const dirCode = parseInt(parts[5], 10);
+          const direction =
+            dirCode === 1 ? "Y / Gravity" :
+            dirCode === 2 ? "Z" :
+            dirCode === 3 ? "X" :
+            `Dir${dirCode}`;
+
+          const magnitude = parseFloat(parts[6]);
+
+          report.push(`${corners},${loadCase},${direction},${magnitude}`);
+        });
+      }
+
+      // ---- MEMBER DISTRIBUTED LOADS ----
+      const distMatch = content.match(/\[DIRECT_DISTRIBUTED_LOADS\] <\d+>([\s\S]*?)\[END_DIRECT_DISTRIBUTED_LOADS\]/);
+      report.push(`\n=== MEMBER DISTRIBUTED LOADS ===`);
+
+      if (!distMatch) {
+        report.push("None found.");
+      } else {
+        const lines = distMatch[1].trim().split("\n").filter(l => l.trim());
+        report.push(`Total distributed loads: ${lines.length}`);
+        report.push("Member,LoadCase,StartMag,EndMag,StartLoc,EndLoc");
+
+        lines.forEach(line => {
+          const parts = line.trim().replace(";", "").split(/\s+/);
+
+          const memberIdx = parseInt(parts[0], 10);
+          const member = members[memberIdx - 1];
+          const memberLabel = member ? member.label : `(idx ${memberIdx})`;
+
+          const loadCase = lcName(parseInt(parts[1], 10));
+          const startMag = parseFloat(parts[2]);
+          const endMag = parseFloat(parts[3]);
+          const startLoc = parseFloat(parts[4]);
+          const endLoc = parseFloat(parts[5]);
+
+          report.push(`${memberLabel},${loadCase},${startMag},${endMag},${startLoc},${endLoc}`);
+        });
+      }
+
+      // ---- NODE LOADS / POINT LOADS ----
+      const nodeLoadMatch = content.match(/\[NODE_LOADS\] <\d+>([\s\S]*?)\[END_NODE_LOADS\]/);
+      report.push(`\n=== POINT LOADS / NODE LOADS ===`);
+
+      if (!nodeLoadMatch) {
+        report.push("None found.");
+      } else {
+        const lines = nodeLoadMatch[1].trim().split("\n").filter(l => l.trim());
+        report.push(`Total node loads: ${lines.length}`);
+        report.push("Node,LoadCase,Magnitude,DirectionCode");
+
+        lines.forEach(line => {
+          const parts = line.trim().replace(";", "").split(/\s+/);
+
+          const nodeIdx = parseInt(parts[0], 10);
+          const node = nodesOrdered[nodeIdx - 1];
+          const nodeLabel = node ? node.label : `(idx ${nodeIdx})`;
+
+          const loadCase = lcName(parseInt(parts[1], 10));
+          const magnitude = parseFloat(parts[2]);
+          const directionCode = parts[3];
+
+          report.push(`${nodeLabel},${loadCase},${magnitude},Dir${directionCode}`);
+        });
+      }
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
