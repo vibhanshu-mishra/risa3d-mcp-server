@@ -1,1 +1,40 @@
-node_modules/ 
+# Node
+node_modules/
+
+# Environment
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# Temporary files
+*.tmp
+*.bak
+
+# RISA project files (client models)
+*.r3d
+*.r3d.bak
+
+# Generated exports
+*.xlsx
+*.xls
+*.csv
+
+# Output folders
+output/
+exports/
