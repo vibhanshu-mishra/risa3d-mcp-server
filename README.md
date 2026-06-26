@@ -2,7 +2,7 @@
 
 > Connect Claude AI to your RISA-3D structural models using the Model Context Protocol (MCP).
 
-Built by a structural engineer, for structural engineers. This MCP server lets you talk to your `.r3d` files in plain English -- no coding required after setup.
+Built by a structural engineer, for structural engineers. This MCP server lets you talk to your `.r3d` files in plain English, no coding required after setup.
 
 ---
 
@@ -108,7 +108,7 @@ Once connected, you can ask Claude things like:
 
 - *"Summarize this model for a report -- include members, nodes, loads, boundary conditions, and materials"*
 - *"What steel grade and Fy value is assigned in this model?"*
-- *"List all the boundary conditions -- which nodes are fixed vs. pinned?"*
+- *"List all the boundary conditions, which nodes are fixed vs. pinned?"*
 - *"What section sizes are assigned to each section set?"*
 - *"List all the members and their section sizes"*
 - *"Run a QC check on this model"*
@@ -132,7 +132,7 @@ Once connected, you can ask Claude things like:
 
 Download and install the **LTS version** from [nodejs.org](https://nodejs.org). Click through all the defaults.
 
-Verify it worked -- open Command Prompt and run:
+Verify it worked, open Command Prompt and run:
 ```
 node --version
 npm --version
@@ -160,7 +160,7 @@ cd C:\risa-mcp
 node index.js
 ```
 
-If you see a blinking cursor with no errors -- it is working. Press **Ctrl+C** to stop it.
+If you see a blinking cursor with no errors, it is working. Press **Ctrl+C** to stop it.
 
 ---
 
@@ -355,11 +355,11 @@ revised: "C:\path\to\model-v2.r3d"
 | `get_deflection_limits` | Returns the deflection limit ratios (L/240, L/360, etc.) defined in both the global deflection rules and member deflection rules. Shows "Not checked" for any category set to -1. |
 | `modify_section_set` | Changes a section size and saves a NEW `.r3d` file (never overwrites the original). Can change the section set definition, specific member assignments, or both. Optional `setName` or `memberLabel` to narrow the change to a single set or member. |
 | `clone_model_with_changes` | Saves a copy of the model with one or more changes applied: section sizes, boundary conditions, member distributed load magnitudes and node load magnitudes. Always writes to a new file. Useful for parametric studies and what-if comparisons. |
-| `get_material_takeoff` | Returns total weight by section size and a grand total, calculated from AISC shape designations (W/C shapes: number after the X is lb/ft) plus a lookup table for HSS and angle shapes. Sizes not in the table are flagged as unknown rather than guessed, and excluded from the total. |
+| `get_material_takeoff` | Returns total weight by section size and a total, calculated from AISC shape designations (W/C shapes: number after the X is lb/ft) plus a lookup table for HSS and angle shapes. Sizes not in the table are flagged as unknown rather than guessed, and excluded from the total. |
 | `find_unbraced_length_issues` | Flags members longer than a threshold (default 15 ft, adjustable) for manual review. This is a length screen only -- it does NOT calculate KL/r, apply K-factors, or account for intermediate brace points. Intended to surface candidates for engineering judgment, not to replace it. |
 | `export_member_schedule_to_excel` | Writes the member schedule directly to a real `.xlsx` file at a path you specify, instead of returning CSV text to copy-paste. |
 | `batch_summarize_folder_to_excel` | Writes the batch folder summary directly to a real `.xlsx` file. Same data as `batch_summarize_folder`, saved as an actual spreadsheet. |
-| `add_member` | Adds a new member to the model and saves a NEW `.r3d` file. Connects to two existing nodes (by label) or creates new nodes at given coordinates, always appended to the end of the model so no existing member's node references shift. Clones the field structure from an existing member of the same type to avoid guessing internal RISA codes. Requires at least one existing member of the target type already in the model. |
+| `add_member` | Adds a new member to the model and saves a NEW `.r3d` file. Connects to two existing nodes (by label) or creates new nodes at given coordinates, always appended to the end of the model, so no existing member's node references shift. Clones the field structure from an existing member of the same type to avoid guessing internal RISA codes. Requires at least one existing member of the target type already in the model. |
 | `export_to_saf` | Exports a RISA-3D model to SAF format (`.xlsx`), the open exchange standard used by SCIA Engineer, SOFiSTiK, AxisVM, and other structural analysis software. Produces five sheets: StructuralMaterial, StructuralCrossSection, StructuralPointConnection, StructuralCurveMember, StructuralPointSupport, plus a NOTES sheet documenting two key limitations: (1) coordinates are converted from feet to meters, and (2) RISA's Y-vertical axis is NOT swapped to Z-vertical -- the receiving engineer must handle axis orientation. Loads are not included in this export. |
 | `find_duplicate_nodes` | Scans all nodes for pairs with nearly identical coordinates (default tolerance 0.001 ft, ~0.3mm). Duplicate nodes cause members to appear connected when they aren't, or produce zero-length members that silently corrupt analysis results. Flags pairs by label with exact distance and coordinates. |
 | `replace_section_size_in_folder` | Replaces a section size string across every `.r3d` file in a folder, saving each as a new file with a configurable suffix (never overwrites originals). Useful for applying a spec change across an entire project folder at once. Reports how many replacements were made per file, and skips files with no matches. |
@@ -414,7 +414,7 @@ instead of exposing internal raw IDs.
 
 It does **not** currently edit area loads.
 
-Area loads are intentionally excluded because RISA may generate transient/memberized distributed loads from area loads. Editing area loads without regenerating those derived loads could create an inconsistent model.
+Area loads are intentionally excluded because RISA may generate transient/memberized distributed loads from area loads. Editing the area loads without regenerating those derived loads could create an inconsistent model.
 
 ---
 
@@ -532,7 +532,7 @@ Typical workflow used during development:
 1. Add or modify a parser in `risa-core.js`
 2. Test locally using `risa-cli.js`
 3. Validate against a real `.r3d` file
-4. Move the logic into MCP tools in `index.js`
+4. Move the logic into the MCP tools in `index.js`
 5. Test again through Claude Desktop
 
 The CLI exists specifically so parser development does not require Claude or MCP during iteration.
@@ -663,7 +663,7 @@ Pull requests are welcome. If you work with RISA-3D and have ideas for new tools
 
 Built by **Vibhanshu Mishra, PE** -- Structural Engineer at AG&E Structural Engineers, Austin TX.
 
-Specializing in steel and mission-critical structures. Building AI tools for a niche where none existed.
+Specialising in steel and mission-critical structures. Building AI tools for a niche where none existed.
 
 ---
 
