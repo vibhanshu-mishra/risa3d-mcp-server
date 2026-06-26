@@ -753,9 +753,3 @@ Pull requests are welcome. If you work with RISA-3D and have ideas for new tools
 Built by **Vibhanshu Mishra, PE** -- Structural Engineer at AG&E Structural Engineers, Austin TX.
 
 Specialising in steel and mission-critical structures. Building AI tools for a niche where none existed.
-
----
-
-## License
-
-MIT License -- free to use, modify, and share.
