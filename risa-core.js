@@ -94,19 +94,27 @@ export function buildBasicLoadCaseHelpers(content) {
   return { nameByIndex, areaLoadCaseByRowIndex };
 }
 
+export function getSectionLines(content, sectionName, endSectionName) {
+  const regex = new RegExp(`\\[${sectionName}\\] <\\d+>([\\s\\S]*?)\\[${endSectionName}\\]`);
+  const match = content.match(regex);
+  if (!match) return [];
+  return match[1].trim().split("\n").filter(l => l.trim());
+}
+
+function buildLoadRows(lines, cursor, count) {
+  return lines.slice(cursor, cursor + count).map((line, i) => ({
+    rowNumber: cursor + i + 1,
+    tokens: tokenize(line.trim().replace(/;\s*$/, "")),
+    raw: line.trim()
+  }));
+}
+
 export function parseLoadsByBasicLoadCase(content) {
   const blcData = parseBasicLoadCases(content);
 
-  const getLines = (sectionName, endSectionName) => {
-    const regex = new RegExp(`\\[${sectionName}\\] <\\d+>([\\s\\S]*?)\\[${endSectionName}\\]`);
-    const match = content.match(regex);
-    if (!match) return [];
-    return match[1].trim().split("\n").filter(l => l.trim());
-  };
-
-  const nodeLines = getLines("NODE_LOADS", "END_NODE_LOADS");
-  const distLines = getLines("DIRECT_DISTRIBUTED_LOADS", "END_DIRECT_DISTRIBUTED_LOADS");
-  const areaLines = getLines("AREA_LOADS", "END_AREA_LOADS");
+  const nodeLines = getSectionLines(content, "NODE_LOADS", "END_NODE_LOADS");
+  const distLines = getSectionLines(content, "DIRECT_DISTRIBUTED_LOADS", "END_DIRECT_DISTRIBUTED_LOADS");
+  const areaLines = getSectionLines(content, "AREA_LOADS", "END_AREA_LOADS");
 
   let nodeCursor = 0;
   let distCursor = 0;
@@ -121,23 +129,9 @@ export function parseLoadsByBasicLoadCase(content) {
       const distCount = parseInt(cleanSemi(t[5]), 10) || 0;
       const areaCount = parseInt(cleanSemi(t[6]), 10) || 0;
 
-      const nodeLoads = nodeLines.slice(nodeCursor, nodeCursor + nodeCount).map((line, i) => ({
-        rowNumber: nodeCursor + i + 1,
-        tokens: line.trim().replace(";", "").split(/\s+/),
-        raw: line.trim()
-      }));
-
-      const distributedLoads = distLines.slice(distCursor, distCursor + distCount).map((line, i) => ({
-        rowNumber: distCursor + i + 1,
-        tokens: line.trim().replace(";", "").split(/\s+/),
-        raw: line.trim()
-      }));
-
-      const areaLoads = areaLines.slice(areaCursor, areaCursor + areaCount).map((line, i) => ({
-        rowNumber: areaCursor + i + 1,
-        tokens: line.trim().replace(";", "").split(/\s+/),
-        raw: line.trim()
-      }));
+      const nodeLoads = buildLoadRows(nodeLines, nodeCursor, nodeCount);
+      const distributedLoads = buildLoadRows(distLines, distCursor, distCount);
+      const areaLoads = buildLoadRows(areaLines, areaCursor, areaCount);
 
       nodeCursor += nodeCount;
       distCursor += distCount;
@@ -216,4 +210,269 @@ export function distance3D(a, b) {
   const dz = b.z - a.z;
 
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+export function replaceQuotedToken(line, oldValue, newValue) {
+  const oldQuotedRegex = new RegExp(`"${oldValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*"`, "i");
+
+  if (oldQuotedRegex.test(line)) {
+    return line.replace(oldQuotedRegex, `"${newValue.padEnd(oldValue.length, " ")}"`);
+  }
+
+  return line;
+}
+
+export function replaceSectionSizeInContent(content, replacement) {
+  const oldSize = replacement.oldSize;
+  const newSize = replacement.newSize;
+  const scope = replacement.scope || "both";
+  const filterName = replacement.filterName;
+
+  let updatedContent = content;
+  let setsChanged = 0;
+  let membersChanged = 0;
+
+  if (scope === "set" || scope === "both") {
+    const setsMatch = updatedContent.match(/(\[\.HR_STEEL_SECTION_SETS\] <\d+>)([\s\S]*?)(\[\.END_HR_STEEL_SECTION_SETS\])/);
+
+    if (setsMatch) {
+      const newBlock = setsMatch[2].split("\n").map(line => {
+        if (!line.trim()) return line;
+
+        const t = tokenize(line);
+        if (!t || t.length < 3) return line;
+
+        if (filterName && clean(t[0]) !== filterName) return line;
+
+        if (clean(t[2]).toUpperCase() === oldSize.toUpperCase()) {
+          setsChanged++;
+          return replaceQuotedToken(line, clean(t[2]), newSize);
+        }
+
+        return line;
+      }).join("\n");
+
+      updatedContent = updatedContent.replace(setsMatch[2], newBlock);
+    }
+  }
+
+  if (scope === "member" || scope === "both") {
+    const membersMatch = updatedContent.match(/(\[\.MEMBERS_MAIN_DATA\] <\d+>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+
+    if (membersMatch) {
+      const newBlock = membersMatch[2].split("\n").map(line => {
+        if (!line.trim()) return line;
+
+        const t = tokenize(line);
+        if (!t || t.length < 3) return line;
+
+        if (filterName && clean(t[0]) !== filterName) return line;
+
+        if (clean(t[2]).toUpperCase() === oldSize.toUpperCase()) {
+          membersChanged++;
+          return replaceQuotedToken(line, clean(t[2]), newSize);
+        }
+
+        return line;
+      }).join("\n");
+
+      updatedContent = updatedContent.replace(membersMatch[2], newBlock);
+    }
+  }
+
+  return {
+    content: updatedContent,
+    setsChanged,
+    membersChanged
+  };
+}
+
+export function runQCChecks(content) {
+  const nodesOrdered = parseNodesOrdered(content);
+
+  const nodeCoordMap = {};
+  nodesOrdered.forEach(n => {
+    const key = `${n.x},${n.y},${n.z}`;
+    if (!nodeCoordMap[key]) nodeCoordMap[key] = [];
+    nodeCoordMap[key].push(n.label);
+  });
+
+  const duplicateNodes = Object.entries(nodeCoordMap)
+    .filter(([coords, labels]) => labels.length > 1)
+    .map(([coords, labels]) => ({
+      coords,
+      labels
+    }));
+
+  const members = parseMembersResolved(content, nodesOrdered);
+
+  const memberLabels = new Set();
+  const duplicateMemberLabels = [];
+  const missingSize = [];
+  const zeroLength = [];
+  const invalidNodeRefs = [];
+
+  members.forEach(m => {
+    if (memberLabels.has(m.label)) duplicateMemberLabels.push(m.label);
+    memberLabels.add(m.label);
+
+    if (!m.size) missingSize.push(m.label);
+
+    if (!m.iNode) {
+      invalidNodeRefs.push(`${m.label}: i-node index ${m.iNodeIndex} is out of range (model has ${nodesOrdered.length} nodes)`);
+    }
+
+    if (!m.jNode) {
+      invalidNodeRefs.push(`${m.label}: j-node index ${m.jNodeIndex} is out of range (model has ${nodesOrdered.length} nodes)`);
+    }
+
+    if (m.iNode && m.jNode) {
+      const len = distance3D(m.iCoord, m.jCoord);
+      if (len !== null && len < 0.001) {
+        zeroLength.push(`${m.label} (${m.iNode} = ${m.jNode})`);
+      }
+    }
+  });
+
+  const issueCount =
+    duplicateNodes.length +
+    duplicateMemberLabels.length +
+    missingSize.length +
+    zeroLength.length +
+    invalidNodeRefs.length;
+
+  return {
+    nodeCount: nodesOrdered.length,
+    memberCount: members.length,
+    duplicateNodes,
+    duplicateMemberLabels,
+    missingSize,
+    zeroLength,
+    invalidNodeRefs,
+    issueCount,
+    status: issueCount === 0 ? "PASS" : "REVIEW"
+  };
+}
+
+export function padRISA(str, width = 32) {
+  if (str.length >= width) return str.slice(0, width);
+  return str + " ".repeat(width - str.length);
+}
+
+export function formatSciNotation(val) {
+  return val.toExponential(12).replace(/e([+-])(\d+)/, (m, sign, digits) => {
+    return `e${sign}${digits.padStart(2, "0")}`;
+  });
+}
+
+export function generateUnusedLabel(prefix, usedSet, start = 9001) {
+  let n = start;
+  while (usedSet.has(`${prefix}${n}`)) n++;
+  const label = `${prefix}${n}`;
+  usedSet.add(label);
+  return label;
+}
+
+export function getNodesSection(content) {
+  const match = content.match(/(\[NODES\] <)(\d+)(>)([\s\S]*?)(\[END_NODES\])/);
+  if (!match) return null;
+
+  const body = match[4];
+  const lines = body.split("\n").filter(l => l.trim());
+
+  return {
+    match,
+    body,
+    lines,
+    count: lines.length
+  };
+}
+
+export function getMembersSection(content) {
+  const match = content.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+  if (!match) return null;
+
+  const body = match[4];
+  const lines = body.split("\n").filter(l => l.trim());
+
+  return {
+    match,
+    body,
+    lines,
+    count: lines.length
+  };
+}
+
+export function getTrailingNodeFields(nodeLines) {
+  if (!nodeLines || nodeLines.length === 0) return "";
+  const lastNodeTokens = tokenize(nodeLines[nodeLines.length - 1]);
+  return lastNodeTokens.slice(4).join(" ").replace(/;\s*$/, "");
+}
+
+export function buildNodeLine(label, x, y, z, trailingNodeFields) {
+  return (
+    `"${padRISA(label)}"   ` +
+    `${formatSciNotation(x)}   ` +
+    `${formatSciNotation(y)}   ` +
+    `${formatSciNotation(z)}   ` +
+    `${trailingNodeFields};`
+  );
+}
+
+export function rebuildNodesSection(nodesMatch, updatedNodeLines) {
+  const newCount = updatedNodeLines.filter(l => l.trim()).length;
+  const updatedBody = updatedNodeLines.join("\n").replace(/\s*$/, "") + "\n";
+  return `${nodesMatch[1]}${newCount}${nodesMatch[3]}${updatedBody}${nodesMatch[5]}`;
+}
+
+export function rebuildMembersSection(membersMatch, updatedMemberLines) {
+  const newCount = updatedMemberLines.filter(l => l.trim()).length;
+  const updatedBody = updatedMemberLines.join("\n").replace(/\s*$/, "") + "\n";
+  return `${membersMatch[1]}${newCount}${membersMatch[3]}${updatedBody}${membersMatch[5]}`;
+}
+
+export function findExistingNodeByCoord(workingNodes, coord, tolerance = 0.001) {
+  return workingNodes.find(n =>
+    Math.abs(n.x - coord.x) <= tolerance &&
+    Math.abs(n.y - coord.y) <= tolerance &&
+    Math.abs(n.z - coord.z) <= tolerance
+  );
+}
+
+export function findOrCreateNodeForGeometry({
+  coord,
+  workingNodes,
+  existingNodeLabels,
+  newNodeLines,
+  trailingNodeFields,
+  tolerance = 0.001
+}) {
+  const existing = findExistingNodeByCoord(workingNodes, coord, tolerance);
+
+  if (existing) {
+    return existing.index;
+  }
+
+  const label = generateUnusedLabel("N", existingNodeLabels);
+  const index = workingNodes.length + 1;
+
+  const newLine = buildNodeLine(
+    label,
+    coord.x,
+    coord.y,
+    coord.z,
+    trailingNodeFields
+  );
+
+  newNodeLines.push(newLine);
+
+  workingNodes.push({
+    label,
+    x: coord.x,
+    y: coord.y,
+    z: coord.z,
+    index
+  });
+
+  return index;
 }

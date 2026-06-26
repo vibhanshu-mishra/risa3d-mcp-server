@@ -14,7 +14,18 @@ import {
   parseLoadsByBasicLoadCase,
   parseNodesOrdered,
   parseMembersResolved,
-  distance3D
+  distance3D,
+  replaceSectionSizeInContent,
+  replaceQuotedToken,
+  runQCChecks,
+  padRISA,
+  getNodesSection,
+  getMembersSection,
+  getTrailingNodeFields,
+  rebuildNodesSection,
+  rebuildMembersSection,
+  generateUnusedLabel,
+  findOrCreateNodeForGeometry
 } from "./risa-core.js";
 
 const server = new McpServer({
@@ -297,71 +308,44 @@ server.tool(
   async ({ filePath }) => {
     try {
       const content = fs.readFileSync(filePath, "utf8");
+      const qc = runQCChecks(content);
+
       const issues = [];
 
-      const nodesOrdered = parseNodesOrdered(content);
-
-      // Duplicate node coordinates
-      const nodeCoordMap = {};
-      nodesOrdered.forEach(n => {
-        const key = `${n.x},${n.y},${n.z}`;
-        if (!nodeCoordMap[key]) nodeCoordMap[key] = [];
-        nodeCoordMap[key].push(n.label);
-      });
-      const duplicateNodeGroups = Object.entries(nodeCoordMap).filter(([k, labels]) => labels.length > 1);
-
       issues.push("--- Duplicate Nodes (same coordinates) ---");
-      if (duplicateNodeGroups.length > 0) {
-        duplicateNodeGroups.forEach(([coords, labels]) => {
-          issues.push(`Multiple nodes at (${coords}): ${labels.join(", ")}`);
+      if (qc.duplicateNodes.length > 0) {
+        qc.duplicateNodes.forEach(group => {
+          issues.push(`Multiple nodes at (${group.coords}): ${group.labels.join(", ")}`);
         });
       } else {
         issues.push("None found.");
       }
 
-      // Members
-      const members = parseMembersResolved(content, nodesOrdered);
-      const memberLabels = new Set();
-      const duplicateMemberLabels = [];
-      const missingSize = [];
-      const zeroLength = [];
-      const invalidNodeRefs = [];
-
-      members.forEach(m => {
-        if (memberLabels.has(m.label)) duplicateMemberLabels.push(m.label);
-        memberLabels.add(m.label);
-
-        if (!m.size) missingSize.push(m.label);
-
-        if (!m.iNode) invalidNodeRefs.push(`${m.label}: i-node index ${m.iNodeIndex} is out of range (model has ${nodesOrdered.length} nodes)`);
-        if (!m.jNode) invalidNodeRefs.push(`${m.label}: j-node index ${m.jNodeIndex} is out of range (model has ${nodesOrdered.length} nodes)`);
-
-        if (m.iNode && m.jNode) {
-          const len = distance3D(m.iCoord, m.jCoord);
-          if (len !== null && len < 0.001) {
-            zeroLength.push(`${m.label} (${m.iNode} = ${m.jNode})`);
-          }
-        }
-      });
-
       issues.push("\n--- Duplicate Member Labels ---");
-      issues.push(duplicateMemberLabels.length > 0 ? duplicateMemberLabels.join(", ") : "None found.");
+      issues.push(qc.duplicateMemberLabels.length > 0 ? qc.duplicateMemberLabels.join(", ") : "None found.");
 
       issues.push("\n--- Members With No Section Size Assigned ---");
-      issues.push(missingSize.length > 0 ? missingSize.join(", ") : "None found.");
+      issues.push(qc.missingSize.length > 0 ? qc.missingSize.join(", ") : "None found.");
 
       issues.push("\n--- Zero-Length Members ---");
-      issues.push(zeroLength.length > 0 ? zeroLength.join(", ") : "None found.");
+      issues.push(qc.zeroLength.length > 0 ? qc.zeroLength.join(", ") : "None found.");
 
       issues.push("\n--- Members Referencing Invalid Node Indices ---");
-      issues.push(invalidNodeRefs.length > 0 ? invalidNodeRefs.join("\n") : "None found.");
+      issues.push(qc.invalidNodeRefs.length > 0 ? qc.invalidNodeRefs.join("\n") : "None found.");
 
       return {
         content: [{
           type: "text",
-          text: `QC Check Report\nFile: ${filePath}\nNodes: ${nodesOrdered.length}, Members: ${members.length}\n\n` + issues.join("\n")
+          text:
+            `QC Check Report\n` +
+            `File: ${filePath}\n` +
+            `Status: ${qc.status}\n` +
+            `Issue Count: ${qc.issueCount}\n` +
+            `Nodes: ${qc.nodeCount}, Members: ${qc.memberCount}\n\n` +
+            issues.join("\n")
         }]
       };
+
     } catch (err) {
       return {
         content: [{ type: "text", text: `Error: ${err.message}` }]
@@ -369,7 +353,6 @@ server.tool(
     }
   }
 );
-
 
 // Tool 9: Get steel materials defined in the model
 server.tool(
@@ -893,22 +876,12 @@ server.tool(
 
 
 // Helper: pad a string to exactly 32 chars for RISA's fixed-width quoted fields
-function padRISA(str, width = 32) {
-  if (str.length >= width) return str.slice(0, width);
-  return str + " ".repeat(width - str.length);
-}
-
 // Helper: replace a quoted 32-char field value in a line
 // Replaces "oldVal<padding>" with "newVal<padding>" -- exact width preserved
-function replaceQuotedField(line, oldVal, newVal) {
-  const oldPadded = `"${padRISA(oldVal)}"`;
-  const newPadded = `"${padRISA(newVal)}"`;
-  return line.split(oldPadded).join(newPadded);
-}
 
 // Tool 17: modify_section_set
 // Changes a section size in a RISA-3D model and saves as a NEW file.
-// Mode "set" changes the section set definition (affects all members using that set).
+// Mode "set" changes the section set definition.
 // Mode "member" changes a specific member's size directly.
 // Mode "both" does both.
 // NEVER overwrites the original file.
@@ -920,95 +893,63 @@ server.tool(
     oldSize: z.string().describe("Current section size to replace e.g. HSS8X8X10"),
     newSize: z.string().describe("New section size e.g. HSS8X8X5"),
     mode: z.enum(["set", "member", "both"]).default("both")
-      .describe("set = change section set definition only; member = change member assignments only; both = change both"),
-    setName: z.string().optional()
-      .describe("Optional: only change the section set with this exact name. If omitted, changes all sets using oldSize."),
-    memberLabel: z.string().optional()
-      .describe("Optional: only change the member with this exact label (e.g. M4). If omitted, changes all members using oldSize.")
+      .describe("set = section set only, member = member assignment only, both = both"),
+    filterName: z.string().optional()
+      .describe("Optional section set name or member label to limit the change")
   },
-  async ({ filePath, outputPath, oldSize, newSize, mode, setName, memberLabel }) => {
+  async ({ filePath, outputPath, oldSize, newSize, mode, filterName }) => {
     try {
-      // Safety check -- never overwrite the original
       if (filePath.toLowerCase() === outputPath.toLowerCase()) {
-        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
-      }
-
-      let fileContent = fs.readFileSync(filePath, "utf8");
-      const report = [];
-      let setsChanged = 0;
-      let membersChanged = 0;
-
-      // --- SECTION SETS ---
-      if (mode === "set" || mode === "both") {
-        const setsMatch = fileContent.match(/(\[\.HR_STEEL_SECTION_SETS\] <\d+>)([\s\S]*?)(\[\.END_HR_STEEL_SECTION_SETS\])/);
-        if (setsMatch) {
-          const setsBlock = setsMatch[2];
-          const newSetsBlock = setsBlock.split("\n").map(line => {
-            if (!line.trim()) return line;
-            const t = tokenize(line);
-            if (!t || t.length < 3) return line;
-            const thisSetName = clean(t[0]);
-            const thisSize = clean(t[2]);
-            // Apply filter if setName specified
-            if (setName && thisSetName !== setName) return line;
-            if (thisSize === oldSize) {
-              setsChanged++;
-              return replaceQuotedField(line, oldSize, newSize);
-            }
-            return line;
-          }).join("\n");
-          fileContent = fileContent.replace(setsMatch[2], newSetsBlock);
-          report.push(`Section sets changed: ${setsChanged}`);
-        } else {
-          report.push("No HR_STEEL_SECTION_SETS section found.");
-        }
-      }
-
-      // --- MEMBERS ---
-      if (mode === "member" || mode === "both") {
-        const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <\d+>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
-        if (membersMatch) {
-          const membersBlock = membersMatch[2];
-          const newMembersBlock = membersBlock.split("\n").map(line => {
-            if (!line.trim()) return line;
-            const t = tokenize(line);
-            if (!t || t.length < 3) return line;
-            const thisLabel = clean(t[0]);
-            const thisSize = clean(t[2]);
-            // Apply filter if memberLabel specified
-            if (memberLabel && thisLabel !== memberLabel) return line;
-            if (thisSize === oldSize) {
-              membersChanged++;
-              return replaceQuotedField(line, oldSize, newSize);
-            }
-            return line;
-          }).join("\n");
-          fileContent = fileContent.replace(membersMatch[2], newMembersBlock);
-          report.push(`Members changed: ${membersChanged}`);
-        } else {
-          report.push("No MEMBERS_MAIN_DATA section found.");
-        }
-      }
-
-      if (setsChanged === 0 && membersChanged === 0) {
         return {
           content: [{
             type: "text",
-            text: `No matches found for section size "${oldSize}". No file was saved.\nCheck the size string matches exactly what's in the model (use get_section_sets or find_members_by_section to confirm).`
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
           }]
         };
       }
 
-      // Write new file
-      fs.writeFileSync(outputPath, fileContent, "utf8");
-      report.unshift(`Modified model saved to: ${outputPath}`);
-      report.push(`Original unchanged: ${filePath}`);
-      report.push(`Change: "${oldSize}" -> "${newSize}"`);
+      const content = fs.readFileSync(filePath, "utf8");
 
-      return { content: [{ type: "text", text: report.join("\n") }] };
+      const result = replaceSectionSizeInContent(content, {
+        oldSize,
+        newSize,
+        scope: mode,
+        filterName
+      });
+
+      if (result.setsChanged === 0 && result.membersChanged === 0) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `No matches found for section size "${oldSize}". No file written.\n` +
+              `Mode: ${mode}\n` +
+              `Filter: ${filterName || "none"}`
+          }]
+        };
+      }
+
+      fs.writeFileSync(outputPath, result.content, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Modified section size "${oldSize}" -> "${newSize}"`,
+            `Mode: ${mode}`,
+            `Filter: ${filterName || "none"}`,
+            `Section sets changed: ${result.setsChanged}`,
+            `Member assignments changed: ${result.membersChanged}`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`
+          ].join("\n")
+        }]
+      };
 
     } catch (err) {
-      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
     }
   }
 );
@@ -1084,7 +1025,7 @@ server.tool(
                 if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
                 if (clean(t[2]) === sc.oldSize) {
                   setsChanged++;
-                  return replaceQuotedField(line, sc.oldSize, sc.newSize);
+                  return replaceQuotedToken(line, sc.oldSize, sc.newSize);
                 }
                 return line;
               }).join("\n");
@@ -1103,7 +1044,7 @@ server.tool(
                 if (sc.filterName && clean(t[0]) !== sc.filterName) return line;
                 if (clean(t[2]) === sc.oldSize) {
                   membersChanged++;
-                  return replaceQuotedField(line, sc.oldSize, sc.newSize);
+                  return replaceQuotedToken(line, sc.oldSize, sc.newSize);
                 }
                 return line;
               }).join("\n");
@@ -2796,6 +2737,1522 @@ server.tool(
       return {
         content: [{ type: "text", text: `Error: ${err.message}` }]
       };
+    }
+  }
+);
+
+// Tool 32: batch_replace_section_size
+// Applies multiple section size replacements in one model and saves a NEW .r3d file.
+// NEVER overwrites the original file.
+server.tool(
+  "batch_replace_section_size",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    replacements: z.array(z.object({
+      oldSize: z.string().describe("Current section size e.g. C15X33.9"),
+      newSize: z.string().describe("Replacement section size e.g. C12X20.7"),
+      scope: z.enum(["set", "member", "both"]).optional().default("both"),
+      filterName: z.string().optional().describe("Optional set name or member label to limit this replacement")
+    })).describe("List of section size replacements to apply")
+  },
+  async ({ filePath, outputPath, replacements }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
+          }]
+        };
+      }
+
+      if (!replacements || replacements.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: replacements array is empty. Provide at least one oldSize/newSize replacement."
+          }]
+        };
+      }
+
+      let content = fs.readFileSync(filePath, "utf8");
+      const report = [];
+
+      report.push("BATCH SECTION SIZE REPLACEMENT");
+      report.push(`Source: ${filePath}`);
+      report.push(`Output: ${outputPath}`);
+      report.push("");
+
+      let totalSetsChanged = 0;
+      let totalMembersChanged = 0;
+
+      for (const replacement of replacements) {
+        const result = replaceSectionSizeInContent(content, replacement);
+
+        content = result.content;
+        totalSetsChanged += result.setsChanged;
+        totalMembersChanged += result.membersChanged;
+
+        report.push([
+          `${replacement.oldSize} -> ${replacement.newSize}`,
+          `scope=${replacement.scope || "both"}`,
+          replacement.filterName ? `filter=${replacement.filterName}` : "filter=none",
+          `sets=${result.setsChanged}`,
+          `members=${result.membersChanged}`
+        ].join(", "));
+      }
+
+      if (totalSetsChanged === 0 && totalMembersChanged === 0) {
+        report.push("");
+        report.push("No matching section sizes found. No file written.");
+
+        return {
+          content: [{ type: "text", text: report.join("\n") }]
+        };
+      }
+
+      fs.writeFileSync(outputPath, content, "utf8");
+
+      report.push("");
+      report.push(`Total section sets changed: ${totalSetsChanged}`);
+      report.push(`Total member assignments changed: ${totalMembersChanged}`);
+      report.push(`Saved new model: ${outputPath}`);
+      report.push(`Original unchanged: ${filePath}`);
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 33: batch_qc_folder
+// Runs QC checks across every .r3d file in a folder and writes one Excel summary.
+// Read-only against models. Creates/overwrites only the specified .xlsx output file.
+server.tool(
+  "batch_qc_folder",
+  {
+    folderPath: z.string().describe("Folder containing .r3d files"),
+    outputPath: z.string().describe("Full path for the Excel output file, e.g. C:\\\\Users\\\\you\\\\Desktop\\\\qc-summary.xlsx"),
+    filterName: z.string().optional().describe("Optional: only include .r3d files whose file name contains this text")
+  },
+  async ({ folderPath, outputPath, filterName }) => {
+    try {
+      const XLSX = await import("xlsx");
+
+      if (!fs.existsSync(folderPath)) {
+        return { content: [{ type: "text", text: `Error: folder does not exist: ${folderPath}` }] };
+      }
+
+      let files = fs.readdirSync(folderPath)
+        .filter(f => f.toLowerCase().endsWith(".r3d"));
+
+      if (filterName) {
+        const f = filterName.toLowerCase();
+        files = files.filter(name => name.toLowerCase().includes(f));
+      }
+
+      if (files.length === 0) {
+        return { content: [{ type: "text", text: "No .r3d files found in the folder." }] };
+      }
+
+      const rows = [];
+
+      for (const fileName of files) {
+        const filePath = path.join(folderPath, fileName);
+
+        try {
+          const content = fs.readFileSync(filePath, "utf8");
+          const qc = runQCChecks(content);
+
+          rows.push({
+            File: fileName,
+            Status: qc.status,
+            "Issue Count": qc.issueCount,
+            Nodes: qc.nodeCount,
+            Members: qc.memberCount,
+            "Duplicate Node Groups": qc.duplicateNodes.length,
+            "Duplicate Member Labels": qc.duplicateMemberLabels.length,
+            "Members Missing Section": qc.missingSize.length,
+            "Zero-Length Members": qc.zeroLength.length,
+            "Invalid Node References": qc.invalidNodeRefs.length,
+            "Duplicate Node Details": qc.duplicateNodes.map(g => `${g.coords}: ${g.labels.join(" | ")}`).join("; "),
+            "Duplicate Member Details": qc.duplicateMemberLabels.join(", "),
+            "Missing Section Details": qc.missingSize.join(", "),
+            "Zero-Length Details": qc.zeroLength.join(", "),
+            "Invalid Node Ref Details": qc.invalidNodeRefs.join(" | ")
+          });
+
+        } catch (fileErr) {
+          rows.push({
+            File: fileName,
+            Status: "ERROR",
+            "Issue Count": "",
+            Nodes: "",
+            Members: "",
+            "Duplicate Node Groups": "",
+            "Duplicate Member Labels": "",
+            "Members Missing Section": "",
+            "Zero-Length Members": "",
+            "Invalid Node References": "",
+            "Duplicate Node Details": "",
+            "Duplicate Member Details": "",
+            "Missing Section Details": "",
+            "Zero-Length Details": "",
+            "Invalid Node Ref Details": fileErr.message
+          });
+        }
+      }
+
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(workbook, worksheet, "QC Summary");
+      XLSX.writeFile(workbook, outputPath);
+
+      const passCount = rows.filter(r => r.Status === "PASS").length;
+      const reviewCount = rows.filter(r => r.Status === "REVIEW").length;
+      const errorCount = rows.filter(r => r.Status === "ERROR").length;
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "BATCH QC FOLDER COMPLETE",
+            `Folder: ${folderPath}`,
+            `Files checked: ${rows.length}`,
+            `PASS: ${passCount}`,
+            `REVIEW: ${reviewCount}`,
+            `ERROR: ${errorCount}`,
+            `Excel saved to: ${outputPath}`
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 34: export_load_summary_to_excel
+// Exports RISA load summary to Excel with separate sheets:
+// Summary, Distributed Loads, Area Loads, Node Loads.
+server.tool(
+  "export_load_summary_to_excel",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the Excel output file, e.g. C:\\\\Users\\\\you\\\\Desktop\\\\load-summary.xlsx"),
+    includeTransientLoads: z.boolean().optional().default(false)
+      .describe("Include RISA-generated transient area load cases. Default false.")
+  },
+  async ({ filePath, outputPath, includeTransientLoads = false }) => {
+    try {
+      const XLSX = await import("xlsx");
+
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+      const parsed = parseLoadsByBasicLoadCase(content);
+
+      const summaryRows = [];
+      const distributedRows = [];
+      const areaRows = [];
+      const nodeRows = [];
+
+      summaryRows.push({
+        Item: "File",
+        Value: filePath
+      });
+
+      summaryRows.push({
+        Item: "Nodes",
+        Value: nodesOrdered.length
+      });
+
+      summaryRows.push({
+        Item: "Members",
+        Value: members.length
+      });
+
+      summaryRows.push({
+        Item: "Distributed Loads Consumed",
+        Value: `${parsed.totals.consumedDistributedLoads} / ${parsed.totals.distributedLoads}`
+      });
+
+      summaryRows.push({
+        Item: "Area Loads Consumed",
+        Value: `${parsed.totals.consumedAreaLoads} / ${parsed.totals.areaLoads}`
+      });
+
+      summaryRows.push({
+        Item: "Node Loads Consumed",
+        Value: `${parsed.totals.consumedNodeLoads} / ${parsed.totals.nodeLoads}`
+      });
+
+      parsed.cases.forEach(blc => {
+        const isTransient = blc.name.toLowerCase().includes("transient area loads");
+
+        summaryRows.push({
+          Item: `BLC ${blc.index}: ${blc.name}`,
+          Value: isTransient && !includeTransientLoads
+            ? `Skipped transient loads. Distributed=${blc.distributedLoads.length}, Area=${blc.areaLoads.length}, Node=${blc.nodeLoads.length}`
+            : `Distributed=${blc.distributedLoads.length}, Area=${blc.areaLoads.length}, Node=${blc.nodeLoads.length}`
+        });
+
+        if (isTransient && !includeTransientLoads) return;
+
+        blc.distributedLoads.forEach(load => {
+          const p = load.tokens;
+          const memberIdx = parseInt(p[0], 10);
+          const member = members[memberIdx - 1];
+
+          distributedRows.push({
+            "BLC Index": blc.index,
+            "Load Case": blc.name,
+            "Row": load.rowNumber,
+            "Member": member ? member.label : `(idx ${memberIdx})`,
+            "Member Index": memberIdx,
+            "Start Magnitude": parseFloat(p[2]),
+            "End Magnitude": parseFloat(p[3]),
+            "Start Location": parseFloat(p[4]),
+            "End Location": parseFloat(p[5]),
+            "Raw ID": p[1]
+          });
+        });
+
+        blc.areaLoads.forEach(load => {
+          const p = load.tokens;
+
+          const cornerLabels = [0, 1, 2, 3].map(i => {
+            const node = nodesOrdered[parseInt(p[i], 10) - 1];
+            return node ? node.label : `(idx ${p[i]})`;
+          });
+
+          areaRows.push({
+            "BLC Index": blc.index,
+            "Load Case": blc.name,
+            "Row": load.rowNumber,
+            "Corner 1": cornerLabels[0],
+            "Corner 2": cornerLabels[1],
+            "Corner 3": cornerLabels[2],
+            "Corner 4": cornerLabels[3],
+            "Corners": cornerLabels.join("-"),
+            "Direction Code": p[5],
+            "Magnitude": parseFloat(p[6]),
+            "Raw ID": p[4]
+          });
+        });
+
+        blc.nodeLoads.forEach(load => {
+          const p = load.tokens;
+          const nodeIdx = parseInt(p[0], 10);
+          const node = nodesOrdered[nodeIdx - 1];
+
+          nodeRows.push({
+            "BLC Index": blc.index,
+            "Load Case": blc.name,
+            "Row": load.rowNumber,
+            "Node": node ? node.label : `(idx ${nodeIdx})`,
+            "Node Index": nodeIdx,
+            "Magnitude": parseFloat(p[2]),
+            "Direction Code": p[3],
+            "Raw ID": p[1]
+          });
+        });
+      });
+
+      const workbook = XLSX.utils.book_new();
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(summaryRows),
+        "Summary"
+      );
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(distributedRows),
+        "Distributed Loads"
+      );
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(areaRows),
+        "Area Loads"
+      );
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(nodeRows),
+        "Node Loads"
+      );
+
+      XLSX.writeFile(workbook, outputPath);
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "LOAD SUMMARY EXCEL EXPORT COMPLETE",
+            `Source: ${filePath}`,
+            `Output: ${outputPath}`,
+            `Distributed load rows exported: ${distributedRows.length}`,
+            `Area load rows exported: ${areaRows.length}`,
+            `Node load rows exported: ${nodeRows.length}`,
+            `Include transient loads: ${includeTransientLoads}`
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 35: move_node
+// Moves an existing node by updating its coordinates and saves a NEW .r3d file.
+// Node order is preserved, so existing member connectivity stays intact.
+// NEVER overwrites the original file.
+server.tool(
+  "move_node",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    nodeLabel: z.string().describe("Existing node label to move, e.g. N44"),
+    x: z.number().describe("New X coordinate"),
+    y: z.number().describe("New Y coordinate"),
+    z: z.number().describe("New Z coordinate")
+  },
+  async ({ filePath, outputPath, nodeLabel, x, y, z }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
+          }]
+        };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const nodesMatch = fileContent.match(/(\[NODES\] <\d+>)([\s\S]*?)(\[END_NODES\])/);
+      if (!nodesMatch) {
+        return {
+          content: [{ type: "text", text: "Error: could not find [NODES] section in file." }]
+        };
+      }
+
+      function formatSciNotation(val) {
+        return val.toExponential(12).replace(/e([+-])(\d+)/, (m, sign, digits) => {
+          return `e${sign}${digits.padStart(2, "0")}`;
+        });
+      }
+
+      const nodeLines = nodesMatch[2].split("\n");
+      let found = false;
+      let oldCoords = null;
+
+      const updatedNodeLines = nodeLines.map(line => {
+        if (!line.trim()) return line;
+
+        const t = tokenize(line);
+        const label = clean(t[0]);
+
+        if (label !== nodeLabel) return line;
+
+        found = true;
+
+        oldCoords = {
+          x: parseFloat(t[1]),
+          y: parseFloat(t[2]),
+          z: parseFloat(t[3])
+        };
+
+        const trailingFields = t.slice(4).join(" ").replace(/;\s*$/, "");
+
+        return [
+          t[0],
+          formatSciNotation(x),
+          formatSciNotation(y),
+          formatSciNotation(z),
+          trailingFields + ";"
+        ].join("   ");
+      });
+
+      if (!found) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error: node "${nodeLabel}" not found in model. Use list_nodes to see available node labels.`
+          }]
+        };
+      }
+
+      const updatedNodesBlock = updatedNodeLines.join("\n");
+      fileContent = fileContent.replace(nodesMatch[2], updatedNodesBlock);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "NODE MOVED",
+            `Node: ${nodeLabel}`,
+            `Old coordinates: (${oldCoords.x}, ${oldCoords.y}, ${oldCoords.z})`,
+            `New coordinates: (${x}, ${y}, ${z})`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and confirm the moved node/model geometry before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 36: delete_member
+// Deletes one or more existing members by label and saves a NEW .r3d file.
+// Recalculates the MEMBERS_MAIN_DATA header count.
+// NEVER overwrites the original file.
+server.tool(
+  "delete_member",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    memberLabels: z.array(z.string()).describe("Member labels to delete, e.g. ['M41', 'M42']")
+  },
+  async ({ filePath, outputPath, memberLabels }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
+          }]
+        };
+      }
+
+      if (!memberLabels || memberLabels.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: memberLabels is empty. Provide at least one member label to delete."
+          }]
+        };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+
+      if (!membersMatch) {
+        return {
+          content: [{ type: "text", text: "Error: could not find [.MEMBERS_MAIN_DATA] section in file." }]
+        };
+      }
+
+      const labelsToDelete = new Set(memberLabels.map(l => l.trim()));
+      const membersBlockBody = membersMatch[4];
+      const memberLines = membersBlockBody.split("\n");
+
+      const deleted = [];
+      const keptLines = [];
+
+      memberLines.forEach(line => {
+        if (!line.trim()) {
+          keptLines.push(line);
+          return;
+        }
+
+        const t = tokenize(line);
+        const label = clean(t[0]);
+
+        if (labelsToDelete.has(label)) {
+          deleted.push(label);
+        } else {
+          keptLines.push(line);
+        }
+      });
+
+      const missing = memberLabels.filter(label => !deleted.includes(label));
+
+      if (deleted.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "No members deleted. No file written.",
+              `Requested: ${memberLabels.join(", ")}`,
+              `Not found: ${missing.join(", ")}`
+            ].join("\n")
+          }]
+        };
+      }
+
+      const nonEmptyKeptCount = keptLines.filter(l => l.trim()).length;
+      const updatedMembersBody = keptLines.join("\n").replace(/\s*$/, "") + "\n";
+      const updatedMembersSection =
+        `${membersMatch[1]}${nonEmptyKeptCount}${membersMatch[3]}${updatedMembersBody}${membersMatch[5]}`;
+
+      fileContent = fileContent.replace(membersMatch[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "MEMBER DELETE COMPLETE",
+            `Deleted member(s): ${deleted.join(", ")}`,
+            missing.length > 0 ? `Not found / skipped: ${missing.join(", ")}` : "Not found / skipped: none",
+            `Updated member count: ${nonEmptyKeptCount}`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and confirm the model loads correctly before relying on it."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 37: find_connected_members
+// Given a member label, shows all members connected to its i-node and j-node.
+server.tool(
+  "find_connected_members",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    memberLabel: z.string().describe("Member label to inspect, e.g. M142")
+  },
+  async ({ filePath, memberLabel }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      const target = members.find(m => m.label === memberLabel);
+
+      if (!target) {
+        return {
+          content: [{ type: "text", text: `Error: member "${memberLabel}" not found.` }]
+        };
+      }
+
+      const connectedAtINode = members
+        .filter(m => m.label !== memberLabel && (m.iNode === target.iNode || m.jNode === target.iNode))
+        .map(m => `${m.label} (${m.iNode} -> ${m.jNode}, ${m.size})`);
+
+      const connectedAtJNode = members
+        .filter(m => m.label !== memberLabel && (m.iNode === target.jNode || m.jNode === target.jNode))
+        .map(m => `${m.label} (${m.iNode} -> ${m.jNode}, ${m.size})`);
+
+      const report = [];
+
+      report.push("CONNECTED MEMBER CHECK");
+      report.push(`File: ${filePath}`);
+      report.push(`Target member: ${target.label}`);
+      report.push(`Type: ${target.type}`);
+      report.push(`Size: ${target.size}`);
+      report.push(`i-node: ${target.iNode}`);
+      report.push(`j-node: ${target.jNode}`);
+
+      report.push(`\nMembers connected at i-node (${target.iNode}):`);
+      report.push(connectedAtINode.length > 0 ? connectedAtINode.join("\n") : "None found.");
+
+      report.push(`\nMembers connected at j-node (${target.jNode}):`);
+      report.push(connectedAtJNode.length > 0 ? connectedAtJNode.join("\n") : "None found.");
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 38: get_member_connectivity_at_node
+// Given a node label, lists every member connected to that node.
+server.tool(
+  "get_member_connectivity_at_node",
+  {
+    filePath: z.string().describe("Full path to the .r3d file"),
+    nodeLabel: z.string().describe("Node label to inspect, e.g. N55")
+  },
+  async ({ filePath, nodeLabel }) => {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(content);
+      const members = parseMembersResolved(content, nodesOrdered);
+
+      const nodeExists = nodesOrdered.some(n => n.label === nodeLabel);
+
+      if (!nodeExists) {
+        return {
+          content: [{ type: "text", text: `Error: node "${nodeLabel}" not found.` }]
+        };
+      }
+
+      const connectedMembers = members
+        .filter(m => m.iNode === nodeLabel || m.jNode === nodeLabel)
+        .map(m => ({
+          label: m.label,
+          type: m.type,
+          size: m.size,
+          iNode: m.iNode,
+          jNode: m.jNode,
+          end: m.iNode === nodeLabel ? "i-node" : "j-node"
+        }));
+
+      const report = [];
+
+      report.push("MEMBER CONNECTIVITY AT NODE");
+      report.push(`File: ${filePath}`);
+      report.push(`Node: ${nodeLabel}`);
+      report.push(`Connected member count: ${connectedMembers.length}`);
+
+      if (connectedMembers.length === 0) {
+        report.push("\nNo connected members found.");
+      } else {
+        report.push("\nMember,ConnectedEnd,Type,Size,iNode,jNode");
+
+        connectedMembers.forEach(m => {
+          report.push([
+            m.label,
+            m.end,
+            m.type,
+            m.size,
+            m.iNode,
+            m.jNode
+          ].join(","));
+        });
+      }
+
+      return {
+        content: [{ type: "text", text: report.join("\n") }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 39: copy_member
+// Copies one existing member's full field structure and reconnects it between two existing nodes.
+// Saves a NEW .r3d file. NEVER overwrites the original file.
+server.tool(
+  "copy_member",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    sourceMemberLabel: z.string().describe("Existing member label to copy, e.g. M41"),
+    newMemberLabel: z.string().describe("Label for the new copied member, e.g. M999"),
+    iNodeLabel: z.string().describe("Existing node label for the new member start node, e.g. N10"),
+    jNodeLabel: z.string().describe("Existing node label for the new member end node, e.g. N20")
+  },
+  async ({ filePath, outputPath, sourceMemberLabel, newMemberLabel, iNodeLabel, jNodeLabel }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: outputPath must be different from filePath. This tool never overwrites the original file."
+          }]
+        };
+      }
+
+      if (iNodeLabel === jNodeLabel) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: iNodeLabel and jNodeLabel cannot be the same. A member cannot have zero length."
+          }]
+        };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      const nodeLabelToIndex = {};
+      nodesOrdered.forEach((n, i) => {
+        nodeLabelToIndex[n.label] = i + 1;
+      });
+
+      const iIndex = nodeLabelToIndex[iNodeLabel];
+      const jIndex = nodeLabelToIndex[jNodeLabel];
+
+      if (!iIndex) {
+        return {
+          content: [{ type: "text", text: `Error: i-node "${iNodeLabel}" not found.` }]
+        };
+      }
+
+      if (!jIndex) {
+        return {
+          content: [{ type: "text", text: `Error: j-node "${jNodeLabel}" not found.` }]
+        };
+      }
+
+      const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+
+      if (!membersMatch) {
+        return {
+          content: [{ type: "text", text: "Error: could not find [.MEMBERS_MAIN_DATA] section in file." }]
+        };
+      }
+
+      const membersBlockBody = membersMatch[4];
+      const memberLines = membersBlockBody.split("\n").filter(l => l.trim());
+
+      let sourceLine = null;
+      const existingMemberLabels = new Set();
+
+      memberLines.forEach(line => {
+        const t = tokenize(line);
+        const label = clean(t[0]);
+        existingMemberLabels.add(label);
+
+        if (label === sourceMemberLabel) {
+          sourceLine = line;
+        }
+      });
+
+      if (!sourceLine) {
+        return {
+          content: [{ type: "text", text: `Error: source member "${sourceMemberLabel}" not found.` }]
+        };
+      }
+
+      if (existingMemberLabels.has(newMemberLabel)) {
+        return {
+          content: [{ type: "text", text: `Error: new member label "${newMemberLabel}" already exists in the model.` }]
+        };
+      }
+
+      const sourceTokens = tokenize(sourceLine);
+
+      if (sourceTokens.length < 5) {
+        return {
+          content: [{ type: "text", text: `Error: source member "${sourceMemberLabel}" line could not be parsed safely.` }]
+        };
+      }
+
+      const newTokens = [...sourceTokens];
+
+      newTokens[0] = `"${padRISA(newMemberLabel)}"`;
+      newTokens[3] = String(iIndex);
+      newTokens[4] = String(jIndex);
+
+      const newMemberLine = newTokens.join(" ");
+
+      const updatedMembersBody =
+        membersBlockBody.replace(/\s*$/, "") +
+        "\n" +
+        newMemberLine +
+        "\n";
+
+      const newMemberCount = memberLines.length + 1;
+
+      const updatedMembersSection =
+        `${membersMatch[1]}${newMemberCount}${membersMatch[3]}${updatedMembersBody}${membersMatch[5]}`;
+
+      fileContent = fileContent.replace(membersMatch[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "MEMBER COPY COMPLETE",
+            `Source member: ${sourceMemberLabel}`,
+            `New member: ${newMemberLabel}`,
+            `Copied type: ${clean(sourceTokens[1])}`,
+            `Copied size: ${clean(sourceTokens[2])}`,
+            `New connectivity: ${iNodeLabel} (idx ${iIndex}) -> ${jNodeLabel} (idx ${jIndex})`,
+            `Updated member count: ${newMemberCount}`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and confirm the copied member appears correctly before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Tool 40: split_member
+// Splits one existing member into two members by inserting a new node along its length.
+// Keeps the original member label for the first segment and creates a new member for the second segment.
+// Saves a NEW .r3d file. NEVER overwrites the original file.
+server.tool(
+  "split_member",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    memberLabel: z.string().describe("Existing member label to split, e.g. M41"),
+    splitFraction: z.number().describe("Fraction along member length where split occurs. Use 0.5 for midpoint."),
+    newNodeLabel: z.string().optional().describe("Optional label for inserted node. If omitted, an unused label is generated."),
+    newSecondMemberLabel: z.string().optional().describe("Optional label for second member. If omitted, an unused label is generated.")
+  },
+  async ({ filePath, outputPath, memberLabel, splitFraction, newNodeLabel, newSecondMemberLabel }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+      }
+
+      if (splitFraction <= 0 || splitFraction >= 1) {
+        return { content: [{ type: "text", text: "Error: splitFraction must be between 0 and 1, for example 0.5 for midpoint." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      const members = parseMembersResolved(fileContent, nodesOrdered);
+      const target = members.find(m => m.label === memberLabel);
+
+      if (!target) {
+        return { content: [{ type: "text", text: `Error: member "${memberLabel}" not found.` }] };
+      }
+
+      if (!target.iCoord || !target.jCoord) {
+        return { content: [{ type: "text", text: `Error: member "${memberLabel}" has invalid node references and cannot be split.` }] };
+      }
+
+      const newX = target.iCoord.x + (target.jCoord.x - target.iCoord.x) * splitFraction;
+      const newY = target.iCoord.y + (target.jCoord.y - target.iCoord.y) * splitFraction;
+      const newZ = target.iCoord.z + (target.jCoord.z - target.iCoord.z) * splitFraction;
+
+      const nodesMatch = fileContent.match(/(\[NODES\] <)(\d+)(>)([\s\S]*?)(\[END_NODES\])/);
+      if (!nodesMatch) {
+        return { content: [{ type: "text", text: "Error: could not find [NODES] section in file." }] };
+      }
+
+      const nodesBlockBody = nodesMatch[4];
+      const nodeLines = nodesBlockBody.split("\n").filter(l => l.trim());
+      const existingNodeLabels = new Set(nodeLines.map(line => clean(tokenize(line)[0])));
+
+      function generateUnusedNodeLabel(usedSet) {
+        let n = 9001;
+        while (usedSet.has(`N${n}`)) n++;
+        return `N${n}`;
+      }
+
+      const insertedNodeLabel = newNodeLabel || generateUnusedNodeLabel(existingNodeLabels);
+
+      if (existingNodeLabels.has(insertedNodeLabel)) {
+        return { content: [{ type: "text", text: `Error: node label "${insertedNodeLabel}" already exists.` }] };
+      }
+
+      const newNodeIndex = nodeLines.length + 1;
+
+      const lastNodeLine = nodeLines[nodeLines.length - 1];
+      const lastNodeTokens = tokenize(lastNodeLine);
+      const trailingNodeFields = lastNodeTokens.slice(4).join(" ").replace(/;\s*$/, "");
+
+      function formatSciNotation(val) {
+        return val.toExponential(12).replace(/e([+-])(\d+)/, (m, sign, digits) => {
+          return `e${sign}${digits.padStart(2, "0")}`;
+        });
+      }
+
+      const newNodeLine =
+        `"${padRISA(insertedNodeLabel)}"   ` +
+        `${formatSciNotation(newX)}   ` +
+        `${formatSciNotation(newY)}   ` +
+        `${formatSciNotation(newZ)}   ` +
+        `${trailingNodeFields};`;
+
+      const updatedNodesBody =
+        nodesBlockBody.replace(/\s*$/, "") +
+        "\n" +
+        newNodeLine +
+        "\n";
+
+      const updatedNodesSection =
+        `${nodesMatch[1]}${newNodeIndex}${nodesMatch[3]}${updatedNodesBody}${nodesMatch[5]}`;
+
+      fileContent = fileContent.replace(nodesMatch[0], updatedNodesSection);
+
+      const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+      if (!membersMatch) {
+        return { content: [{ type: "text", text: "Error: could not find [.MEMBERS_MAIN_DATA] section in file." }] };
+      }
+
+      const membersBlockBody = membersMatch[4];
+      const memberLines = membersBlockBody.split("\n").filter(l => l.trim());
+
+      const existingMemberLabels = new Set(memberLines.map(line => clean(tokenize(line)[0])));
+
+      function generateUnusedMemberLabel(usedSet) {
+        let n = 9001;
+        while (usedSet.has(`M${n}`)) n++;
+        return `M${n}`;
+      }
+
+      const secondMemberLabel = newSecondMemberLabel || generateUnusedMemberLabel(existingMemberLabels);
+
+      if (existingMemberLabels.has(secondMemberLabel)) {
+        return { content: [{ type: "text", text: `Error: member label "${secondMemberLabel}" already exists.` }] };
+      }
+
+      let sourceLineFound = false;
+      let secondMemberLine = null;
+
+      const updatedMemberLines = memberLines.map(line => {
+        const t = tokenize(line);
+        const label = clean(t[0]);
+
+        if (label !== memberLabel) return line;
+
+        sourceLineFound = true;
+
+        const firstTokens = [...t];
+        firstTokens[4] = String(newNodeIndex);
+
+        const secondTokens = [...t];
+        secondTokens[0] = `"${padRISA(secondMemberLabel)}"`;
+        secondTokens[3] = String(newNodeIndex);
+        secondTokens[4] = String(target.jNodeIndex);
+
+        secondMemberLine = secondTokens.join(" ");
+
+        return firstTokens.join(" ");
+      });
+
+      if (!sourceLineFound || !secondMemberLine) {
+        return { content: [{ type: "text", text: `Error: could not safely rewrite member "${memberLabel}".` }] };
+      }
+
+      updatedMemberLines.push(secondMemberLine);
+
+      const newMemberCount = updatedMemberLines.length;
+      const updatedMembersBody = updatedMemberLines.join("\n") + "\n";
+
+      const updatedMembersSection =
+        `${membersMatch[1]}${newMemberCount}${membersMatch[3]}${updatedMembersBody}${membersMatch[5]}`;
+
+      fileContent = fileContent.replace(membersMatch[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "MEMBER SPLIT COMPLETE",
+            `Original member: ${memberLabel}`,
+            `First segment: ${memberLabel} (${target.iNode} -> ${insertedNodeLabel})`,
+            `Second segment: ${secondMemberLabel} (${insertedNodeLabel} -> ${target.jNode})`,
+            `Inserted node: ${insertedNodeLabel} at (${newX}, ${newY}, ${newZ})`,
+            `Split fraction: ${splitFraction}`,
+            `Updated node count: ${newNodeIndex}`,
+            `Updated member count: ${newMemberCount}`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and confirm the split member appears correctly before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 41: merge_members
+// Merges two collinear-ish members that share one common node into one member.
+// Keeps the first member label, deletes the second member.
+// Saves a NEW .r3d file. NEVER overwrites the original file.
+server.tool(
+  "merge_members",
+  {
+    filePath: z.string().describe("Full path to the source .r3d file"),
+    outputPath: z.string().describe("Full path for the new .r3d file. Must be different from source."),
+    memberLabel1: z.string().describe("First member label, e.g. M41. This label is kept."),
+    memberLabel2: z.string().describe("Second member label, e.g. M42. This member is deleted.")
+  },
+  async ({ filePath, outputPath, memberLabel1, memberLabel2 }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath. This tool never overwrites the original file." }] };
+      }
+
+      if (memberLabel1 === memberLabel2) {
+        return { content: [{ type: "text", text: "Error: memberLabel1 and memberLabel2 cannot be the same." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      const members = parseMembersResolved(fileContent, nodesOrdered);
+
+      const m1 = members.find(m => m.label === memberLabel1);
+      const m2 = members.find(m => m.label === memberLabel2);
+
+      if (!m1) {
+        return { content: [{ type: "text", text: `Error: member "${memberLabel1}" not found.` }] };
+      }
+
+      if (!m2) {
+        return { content: [{ type: "text", text: `Error: member "${memberLabel2}" not found.` }] };
+      }
+
+      if (m1.type !== m2.type) {
+        return { content: [{ type: "text", text: `Error: members have different types: ${memberLabel1}=${m1.type}, ${memberLabel2}=${m2.type}.` }] };
+      }
+
+      if (m1.size !== m2.size) {
+        return { content: [{ type: "text", text: `Error: members have different sizes: ${memberLabel1}=${m1.size}, ${memberLabel2}=${m2.size}.` }] };
+      }
+
+      const m1Nodes = [
+        { label: m1.iNode, index: m1.iNodeIndex },
+        { label: m1.jNode, index: m1.jNodeIndex }
+      ];
+
+      const m2Nodes = [
+        { label: m2.iNode, index: m2.iNodeIndex },
+        { label: m2.jNode, index: m2.jNodeIndex }
+      ];
+
+      const common = m1Nodes.filter(a => m2Nodes.some(b => b.label === a.label));
+
+      if (common.length !== 1) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error: members must share exactly one common node. Found ${common.length} common node(s).`
+          }]
+        };
+      }
+
+      const commonNode = common[0];
+
+      const outer1 = m1Nodes.find(n => n.label !== commonNode.label);
+      const outer2 = m2Nodes.find(n => n.label !== commonNode.label);
+
+      if (!outer1 || !outer2) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: could not determine outer nodes for merged member."
+          }]
+        };
+      }
+
+      if (outer1.label === outer2.label) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: merge would create a zero-length member because outer nodes are the same."
+          }]
+        };
+      }
+
+      const membersMatch = fileContent.match(/(\[\.MEMBERS_MAIN_DATA\] <)(\d+)(>)([\s\S]*?)(\[\.END_MEMBERS_MAIN_DATA\])/);
+
+      if (!membersMatch) {
+        return {
+          content: [{ type: "text", text: "Error: could not find [.MEMBERS_MAIN_DATA] section in file." }]
+        };
+      }
+
+      const membersBlockBody = membersMatch[4];
+      const memberLines = membersBlockBody.split("\n").filter(l => l.trim());
+
+      let updatedM1 = false;
+      let deletedM2 = false;
+
+      const updatedMemberLines = [];
+
+      memberLines.forEach(line => {
+        const t = tokenize(line);
+        const label = clean(t[0]);
+
+        if (label === memberLabel2) {
+          deletedM2 = true;
+          return;
+        }
+
+        if (label === memberLabel1) {
+          const newTokens = [...t];
+          newTokens[3] = String(outer1.index);
+          newTokens[4] = String(outer2.index);
+          updatedMemberLines.push(newTokens.join(" "));
+          updatedM1 = true;
+          return;
+        }
+
+        updatedMemberLines.push(line);
+      });
+
+      if (!updatedM1 || !deletedM2) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: could not safely update/delete member lines."
+          }]
+        };
+      }
+
+      const newMemberCount = updatedMemberLines.length;
+      const updatedMembersBody = updatedMemberLines.join("\n") + "\n";
+
+      const updatedMembersSection =
+        `${membersMatch[1]}${newMemberCount}${membersMatch[3]}${updatedMembersBody}${membersMatch[5]}`;
+
+      fileContent = fileContent.replace(membersMatch[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "MEMBER MERGE COMPLETE",
+            `Kept member: ${memberLabel1}`,
+            `Deleted member: ${memberLabel2}`,
+            `Type: ${m1.type}`,
+            `Size: ${m1.size}`,
+            `Common node removed from connectivity: ${commonNode.label}`,
+            `New connectivity: ${outer1.label} (idx ${outer1.index}) -> ${outer2.label} (idx ${outer2.index})`,
+            `Updated member count: ${newMemberCount}`,
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and confirm the merged member appears correctly before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 42: mirror_geometry
+// Mirrors selected members by creating mirrored copies.
+// Creates/reuses nodes at mirrored coordinates. Saves a NEW .r3d file.
+server.tool(
+  "mirror_geometry",
+  {
+    filePath: z.string(),
+    outputPath: z.string(),
+    memberLabels: z.array(z.string()),
+    mirrorPlane: z.enum(["XY", "YZ", "XZ"]).describe("XY mirrors Z, YZ mirrors X, XZ mirrors Y"),
+    mirrorAt: z.number().optional().default(0),
+    tolerance: z.number().optional().default(0.001)
+  },
+  async ({ filePath, outputPath, memberLabels, mirrorPlane, mirrorAt = 0, tolerance = 0.001 }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const nodesSection = getNodesSection(fileContent);
+      const membersSection = getMembersSection(fileContent);
+
+      if (!nodesSection) return { content: [{ type: "text", text: "Error: [NODES] section not found." }] };
+      if (!membersSection) return { content: [{ type: "text", text: "Error: [.MEMBERS_MAIN_DATA] section not found." }] };
+
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      const members = parseMembersResolved(fileContent, nodesOrdered);
+
+      const selectedMembers = members.filter(m => memberLabels.includes(m.label));
+      const missingMembers = memberLabels.filter(label => !selectedMembers.some(m => m.label === label));
+
+      if (selectedMembers.length === 0) {
+        return { content: [{ type: "text", text: "Error: none of the requested members were found." }] };
+      }
+
+      const existingNodeLabels = new Set(nodesSection.lines.map(line => clean(tokenize(line)[0])));
+      const existingMemberLabels = new Set(membersSection.lines.map(line => clean(tokenize(line)[0])));
+
+      const trailingNodeFields = getTrailingNodeFields(nodesSection.lines);
+      const workingNodes = nodesOrdered.map((n, i) => ({ ...n, index: i + 1 }));
+
+      const newNodeLines = [];
+      const newMemberLines = [];
+      const report = [];
+
+      function mirrorCoord(coord) {
+        const c = { ...coord };
+
+        if (mirrorPlane === "YZ") c.x = 2 * mirrorAt - c.x;
+        if (mirrorPlane === "XZ") c.y = 2 * mirrorAt - c.y;
+        if (mirrorPlane === "XY") c.z = 2 * mirrorAt - c.z;
+
+        return c;
+      }
+
+      for (const m of selectedMembers) {
+        const sourceLine = membersSection.lines.find(line => clean(tokenize(line)[0]) === m.label);
+        if (!sourceLine) continue;
+
+        const mirroredI = mirrorCoord(m.iCoord);
+        const mirroredJ = mirrorCoord(m.jCoord);
+
+        const newIIndex = findOrCreateNodeForGeometry({
+          coord: mirroredI,
+          workingNodes,
+          existingNodeLabels,
+          newNodeLines,
+          trailingNodeFields,
+          tolerance
+        });
+
+        const newJIndex = findOrCreateNodeForGeometry({
+          coord: mirroredJ,
+          workingNodes,
+          existingNodeLabels,
+          newNodeLines,
+          trailingNodeFields,
+          tolerance
+        });
+
+        if (newIIndex === newJIndex) {
+          report.push(`Skipped ${m.label}: mirrored member would be zero length.`);
+          continue;
+        }
+
+        const t = tokenize(sourceLine);
+        const newLabel = generateUnusedLabel("M", existingMemberLabels);
+
+        t[0] = `"${padRISA(newLabel)}"`;
+        t[3] = String(newIIndex);
+        t[4] = String(newJIndex);
+
+        newMemberLines.push(t.join(" "));
+        report.push(`${m.label} copied as ${newLabel}`);
+      }
+
+      if (newMemberLines.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "No mirrored members created. No file written.\n" + report.join("\n")
+          }]
+        };
+      }
+
+      const updatedNodeLines = [...nodesSection.lines, ...newNodeLines];
+      const updatedMemberLines = [...membersSection.lines, ...newMemberLines];
+
+      const updatedNodesSection = rebuildNodesSection(nodesSection.match, updatedNodeLines);
+      const updatedMembersSection = rebuildMembersSection(membersSection.match, updatedMemberLines);
+
+      fileContent = fileContent.replace(nodesSection.match[0], updatedNodesSection);
+      fileContent = fileContent.replace(membersSection.match[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "MIRROR GEOMETRY COMPLETE",
+            `Mirror plane: ${mirrorPlane}`,
+            `Mirror at: ${mirrorAt}`,
+            `Members copied: ${newMemberLines.length}`,
+            `New nodes created: ${newNodeLines.length}`,
+            missingMembers.length ? `Missing members skipped: ${missingMembers.join(", ")}` : "Missing members skipped: none",
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            report.join("\n"),
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and verify geometry before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// Tool 43: copy_translate_geometry
+// Copies selected members and translates the copied geometry by dx/dy/dz.
+// Reuses existing nodes if matching coordinates are found within tolerance.
+// Saves a NEW .r3d file. NEVER overwrites original.
+server.tool(
+  "copy_translate_geometry",
+  {
+    filePath: z.string(),
+    outputPath: z.string(),
+    memberLabels: z.array(z.string()),
+    dx: z.number().describe("Translation in X"),
+    dy: z.number().describe("Translation in Y"),
+    dz: z.number().describe("Translation in Z"),
+    tolerance: z.number().optional().default(0.001)
+  },
+  async ({ filePath, outputPath, memberLabels, dx, dy, dz, tolerance = 0.001 }) => {
+    try {
+      if (filePath.toLowerCase() === outputPath.toLowerCase()) {
+        return { content: [{ type: "text", text: "Error: outputPath must be different from filePath." }] };
+      }
+
+      let fileContent = fs.readFileSync(filePath, "utf8");
+
+      const nodesSection = getNodesSection(fileContent);
+      const membersSection = getMembersSection(fileContent);
+
+      if (!nodesSection) return { content: [{ type: "text", text: "Error: [NODES] section not found." }] };
+      if (!membersSection) return { content: [{ type: "text", text: "Error: [.MEMBERS_MAIN_DATA] section not found." }] };
+
+      const nodesOrdered = parseNodesOrdered(fileContent);
+      const members = parseMembersResolved(fileContent, nodesOrdered);
+
+      const selectedMembers = members.filter(m => memberLabels.includes(m.label));
+      const missingMembers = memberLabels.filter(label => !selectedMembers.some(m => m.label === label));
+
+      if (selectedMembers.length === 0) {
+        return { content: [{ type: "text", text: "Error: none of the requested members were found." }] };
+      }
+
+      const existingNodeLabels = new Set(nodesSection.lines.map(line => clean(tokenize(line)[0])));
+      const existingMemberLabels = new Set(membersSection.lines.map(line => clean(tokenize(line)[0])));
+
+      const trailingNodeFields = getTrailingNodeFields(nodesSection.lines);
+      const workingNodes = nodesOrdered.map((n, i) => ({ ...n, index: i + 1 }));
+
+      const newNodeLines = [];
+      const newMemberLines = [];
+      const report = [];
+
+      function translateCoord(coord) {
+        return {
+          x: coord.x + dx,
+          y: coord.y + dy,
+          z: coord.z + dz
+        };
+      }
+
+      for (const m of selectedMembers) {
+        const sourceLine = membersSection.lines.find(line => clean(tokenize(line)[0]) === m.label);
+        if (!sourceLine) continue;
+
+        const translatedI = translateCoord(m.iCoord);
+        const translatedJ = translateCoord(m.jCoord);
+
+        const newIIndex = findOrCreateNodeForGeometry({
+          coord: translatedI,
+          workingNodes,
+          existingNodeLabels,
+          newNodeLines,
+          trailingNodeFields,
+          tolerance
+        });
+
+        const newJIndex = findOrCreateNodeForGeometry({
+          coord: translatedJ,
+          workingNodes,
+          existingNodeLabels,
+          newNodeLines,
+          trailingNodeFields,
+          tolerance
+        });
+
+        if (newIIndex === newJIndex) {
+          report.push(`Skipped ${m.label}: translated member would be zero length.`);
+          continue;
+        }
+
+        const t = tokenize(sourceLine);
+        const newLabel = generateUnusedLabel("M", existingMemberLabels);
+
+        t[0] = `"${padRISA(newLabel)}"`;
+        t[3] = String(newIIndex);
+        t[4] = String(newJIndex);
+
+        newMemberLines.push(t.join(" "));
+        report.push(`${m.label} copied as ${newLabel}`);
+      }
+
+      if (newMemberLines.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "No translated members created. No file written.\n" + report.join("\n")
+          }]
+        };
+      }
+
+      const updatedNodeLines = [...nodesSection.lines, ...newNodeLines];
+      const updatedMemberLines = [...membersSection.lines, ...newMemberLines];
+
+      const updatedNodesSection = rebuildNodesSection(nodesSection.match, updatedNodeLines);
+      const updatedMembersSection = rebuildMembersSection(membersSection.match, updatedMemberLines);
+
+      fileContent = fileContent.replace(nodesSection.match[0], updatedNodesSection);
+      fileContent = fileContent.replace(membersSection.match[0], updatedMembersSection);
+
+      fs.writeFileSync(outputPath, fileContent, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "COPY / TRANSLATE GEOMETRY COMPLETE",
+            `Translation: dx=${dx}, dy=${dy}, dz=${dz}`,
+            `Members copied: ${newMemberLines.length}`,
+            `New nodes created: ${newNodeLines.length}`,
+            missingMembers.length ? `Missing members skipped: ${missingMembers.join(", ")}` : "Missing members skipped: none",
+            `Saved new model: ${outputPath}`,
+            `Original unchanged: ${filePath}`,
+            "",
+            report.join("\n"),
+            "",
+            "IMPORTANT: open the saved file in RISA-3D and verify geometry before relying on this model."
+          ].join("\n")
+        }]
+      };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
     }
   }
 );
