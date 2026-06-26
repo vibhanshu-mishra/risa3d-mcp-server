@@ -59,19 +59,19 @@ For Claude Desktop integration, continue to the Installation section below.
 
 ## Table of Contents
 
-- Why This Project Exists
-- What Is This?
-- Quick Start
-- Installation
-- Architecture
-- Available Tools
-- Example Prompts
-- CLI Usage
-- Technical Notes
-- Regression Tests
-- Roadmap
-- Known Limitations
-- License
+- [Why This Project Exists](#why-this-project-exists)
+- [What Is This?](#what-is-this)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [MCP Tools](#mcp-tools)
+- [Example Prompts](#example-prompts)
+- [CLI Usage](#cli-usage)
+- [Technical Notes](#technical-notes)
+- [Regression Tests](#regression-tests)
+- [Roadmap](#roadmap)
+- [Known Limitations](#known-limitations)
+- [License](#license)
 
 ---
 
