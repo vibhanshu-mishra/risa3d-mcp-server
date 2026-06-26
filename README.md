@@ -4,6 +4,14 @@
 
 Built by a structural engineer, for structural engineers. This MCP server lets you talk to your `.r3d` files in plain English, no coding required after setup.
 
+![Node](https://img.shields.io/badge/Node.js-18+-green)
+
+![License](https://img.shields.io/badge/license-MIT-blue)
+
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
+
+![MCP](https://img.shields.io/badge/MCP-Compatible-purple)
+
 ---
 
 ## Demo
@@ -17,11 +25,21 @@ Once connected, just point Claude at any `.r3d` file and start asking questions.
 
 ---
 
+## Why This Project Exists
+
+RISA-3D has no public API.
+
+This project bridges that gap by treating `.r3d` files as the interface, allowing AI assistants to inspect, compare, modify, and report on structural models without automating the RISA application itself.
+
+The goal is to augment structural engineers—not replace engineering judgment.
+
+---
+
 ## What Is This?
 
 MCP (Model Context Protocol) is an open standard that lets AI assistants like Claude connect to external tools and files. This server acts as a bridge between Claude Desktop and your RISA-3D models. Claude reads your `.r3d` files directly and answers questions about them in plain English.
 
-No RISA-3D API is required. This works by reading RISA-3D's plain-text `.r3d` file format directly.
+No RISA-3D API is required. This works by reading RISA-3D's plain-text `.r3d` file format directly. Includes a modular regression test suite to ensure parser and write-tool reliability as the project evolves
 
 ---
 
@@ -45,27 +63,43 @@ For Claude Desktop integration, continue to the Installation section below.
 
 ```text
 risa3d-mcp-server/
-  index.js
-  risa-core.js
-  risa-cli.js
-  package.json
-  README.md
-  CHANGELOG.md
-  .gitignore
-
-  tests/
-    fixtures/
-      sample.r3d
-    output/
-    test-utils.js
-    parser.test.js
-    loads.test.js
-    qc.test.js
-    write-tools.test.js
-    geometry.test.js
-    run-tests.js
-    run-all.js
+│
+├── index.js
+├── risa-core.js
+├── risa-cli.js
+│
+├── tests/
+│   ├── fixtures/
+│   ├── output/
+│   ├── parser.test.js
+│   ├── loads.test.js
+│   ├── qc.test.js
+│   ├── write-tools.test.js
+│   ├── geometry.test.js
+│   ├── run-tests.js
+│   ├── run-all.js
+│   └── test-utils.js
+│
+├── package.json
+├── README.md
+└── CHANGELOG.md
 ```
+
+---
+
+## Architecture
+
+                 Claude Desktop
+                       │
+                MCP Server (index.js)
+                       │
+        ┌──────────────┴──────────────┐
+        │                             │
+     risa-core.js                 risa-cli.js
+        │
+     .r3d parser
+        │
+     RISA files
 
 ---
 
@@ -82,7 +116,7 @@ It can:
 - Run QA/QC checks on RISA models
 - Run CLI diagnostics without Claude/MCP
 
-Currently includes 40+ MCP tools covering: model interrogation, QA/QC, load parsing, Excel/SAF export, model comparison, geometry editing, batch workflows, CLI diagnostics, and regression-tested parsing utilities.:
+Currently includes 40+ MCP tools covering: 
 
 - Model interrogation
 - QA/QC
@@ -355,10 +389,10 @@ revised: "C:\path\to\model-v2.r3d"
 | Tool | Description |
 |---|---|
 | `read_risa_model` | Reads a `.r3d` file and returns a project summary (title, node count, member count, plate count, file size) |
-| `list_members` | Returns a type breakdown summary by default (token-efficient). Use `mode="full"` for full CSV detail. Optional `filterType` (e.g. `"Tube"`, `"Wide Flange"`) to narrow results. |
+| `list_members` | Returns a type breakdown summary by default (token-efficient). Use `mode="full"` for full CSV detail. Optional `filterType` (e.g., `"Tube"`, `"Wide Flange"`) to narrow results. |
 | `list_nodes` | Lists all nodes with their X, Y, Z coordinates |
 | `list_load_combinations` | Lists all load combinations defined in the model |
-| `get_file_section` | Returns the raw contents of any named section in the file (e.g. NODES, MEMBERS, BOUNDARY_CONDITIONS) |
+| `get_file_section` | Returns the raw contents of any named section in the file (e.g., NODES, MEMBERS, BOUNDARY_CONDITIONS) |
 | `compare_risa_models` | Compares two `.r3d` files and reports differences in nodes, member sizes/connectivity, section sets, and load combinations |
 | `export_member_schedule` | Generates a member schedule as CSV (label, type, size, nodes, length). Optional `filterType` to export one section type. Optional `maxRows` cap (default 200). |
 | `qc_check_risa_model` | Checks for duplicate nodes, duplicate member labels, missing section sizes, zero-length members, and invalid node references |
@@ -368,19 +402,18 @@ revised: "C:\path\to\model-v2.r3d"
 | `summarize_model_for_report` | Single-call summary combining project info, nodes, members, section sets, materials, boundary conditions, load combinations, area loads, distributed loads, and point loads -- ready to paste into a calculation package |
 | `batch_summarize_folder` | Scans a folder for all `.r3d` files and returns a CSV summary table (file name, title, designer, node count, member count, section sets, load combos, file size, QC status). Optional `filterName` parameter to match specific file names. |
 | `get_load_cases` | Lists all basic load cases defined in the model with their index, name, and load type (Gravity, Seismic, Wind, etc.) |
-| `find_members_by_section` | Returns all members assigned a specific section size. Accepts partial, case-insensitive matches (e.g. `"hss8"` matches `"HSS8X8X10"`). If no match, lists all sizes in the model. |
+| `find_members_by_section` | Returns all members assigned a specific section size. Accepts partial, case-insensitive matches (e.g., `"hss8"` matches `"HSS8X8X10"`). If no match, lists all sizes in the model. |
 | `get_deflection_limits` | Returns the deflection limit ratios (L/240, L/360, etc.) defined in both the global deflection rules and member deflection rules. Shows "Not checked" for any category set to -1. |
 | `modify_section_set` | Changes a section size and saves a NEW `.r3d` file (never overwrites the original). Can change the section set definition, specific member assignments, or both. Optional `setName` or `memberLabel` to narrow the change to a single set or member. |
-| `clone_model_with_changes` | Saves a copy of the model with one or more changes applied: section sizes, boundary conditions, member distributed load magnitudes and node load magnitudes. Always writes to a new file. Useful for parametric studies and what-if comparisons. |
-| `get_material_takeoff` | Returns total weight by section size and a total, calculated from AISC shape designations (W/C shapes: number after the X is lb/ft) plus a lookup table for HSS and angle shapes. Sizes not in the table are flagged as unknown rather than guessed, and excluded from the total. |
+| `clone_model_with_changes` | Saves a copy of the model with one or more changes applied: section sizes, boundary conditions, member distributed load magnitudes, and node load magnitudes. Always writes to a new file. Useful for parametric studies and what-if comparisons. |
+| `get_material_takeoff` | Returns total weight by section size and a total, calculated from AISC shape designations (W/C shapes: number after the X is lb/ft) plus a lookup table for HSS and angle shapes. Sizes not in the table are flagged as unknown rather than guessed and excluded from the total. |
 | `find_unbraced_length_issues` | Flags members longer than a threshold (default 15 ft, adjustable) for manual review. This is a length screen only -- it does NOT calculate KL/r, apply K-factors, or account for intermediate brace points. Intended to surface candidates for engineering judgment, not to replace it. |
 | `export_member_schedule_to_excel` | Writes the member schedule directly to a real `.xlsx` file at a path you specify, instead of returning CSV text to copy-paste. |
 | `batch_summarize_folder_to_excel` | Writes the batch folder summary directly to a real `.xlsx` file. Same data as `batch_summarize_folder`, saved as an actual spreadsheet. |
 | `add_member` | Adds a new member to the model and saves a NEW `.r3d` file. Connects to two existing nodes (by label) or creates new nodes at given coordinates, always appended to the end of the model, so no existing member's node references shift. Clones the field structure from an existing member of the same type to avoid guessing internal RISA codes. Requires at least one existing member of the target type already in the model. |
 | `export_to_saf` | Exports a RISA-3D model to SAF format (`.xlsx`), the open exchange standard used by SCIA Engineer, SOFiSTiK, AxisVM, and other structural analysis software. Produces five sheets: StructuralMaterial, StructuralCrossSection, StructuralPointConnection, StructuralCurveMember, StructuralPointSupport, plus a NOTES sheet documenting two key limitations: (1) coordinates are converted from feet to meters, and (2) RISA's Y-vertical axis is NOT swapped to Z-vertical -- the receiving engineer must handle axis orientation. Loads are not included in this export. |
-| `find_duplicate_nodes` | Scans all nodes for pairs with nearly identical coordinates (default tolerance 0.001 ft, ~0.3mm). Duplicate nodes cause members to appear connected when they aren't, or produce zero-length members that silently corrupt analysis results. Flags pairs by label with exact distance and coordinates. |
-| `replace_section_size_in_folder` | Replaces a section size string across every `.r3d` file in a folder, saving each as a new file with a configurable suffix (never overwrites originals). Useful for applying a spec change across an entire project folder at once. Reports how many replacements were made per file, and skips files with no matches. |
-| `compare_risa_models` | Diffs two `.r3d` files and reports exactly what changed: nodes added, removed, or moved; members added, removed, or changed (size, type, or connectivity); section sets added, removed, or resized; and load combination count changes. Useful for tracking design iterations and documenting changes between submittals. |
+| `find_duplicate_nodes` | Scans all nodes for pairs with nearly identical coordinates (default tolerance 0.001 ft, ~0.3 mm). Duplicate nodes cause members to appear connected when they aren't, or produce zero-length members that silently corrupt analysis results. Flags pairs by label with exact distance and coordinates. |
+| `replace_section_size_in_folder` | Replaces a section size string across every `.r3d` file in a folder, saving each as a new file with a configurable suffix (never overwrites originals). Useful for applying a spec change across an entire project folder at once. Reports how many replacements were made per file and skips files with no matches. |
 | `batch_replace_section_size` | Applies multiple section size replacements in one model and saves a new `.r3d` file. |
 | `batch_qc_folder` | Runs QC checks across every `.r3d` file in a folder and writes one Excel summary. |
 | `export_load_summary_to_excel` | Exports load summaries to Excel with separate sheets for Summary, Distributed Loads, Area Loads, and Node Loads. |
@@ -396,7 +429,7 @@ revised: "C:\path\to\model-v2.r3d"
 
 ---
 
-## Important RISA-3D Load Parsing Note
+## RISA-3D Load Parsing
 
 RISA-3D `.r3d` files do not always store visible load case names directly inside load rows. For example, load rows may contain internal raw IDs like:
 
@@ -506,44 +539,6 @@ In your MCP client config, point to:
 ```cmd
 node C:\path\to\risa3d-mcp-server\index.js
 ```
-
-## Load Parsing Discovery
-
-During development, it was discovered that RISA-3D does not store the visible Basic Load Case number directly inside load rows.
-
-For example:
-
-```text
-88
-89
-90
-```
-
-appear inside:
-
-- NODE_LOADS
-- DIRECT_DISTRIBUTED_LOADS
-- AREA_LOADS
-
-These values are internal RISA identifiers and should not be interpreted as the visible load case number shown in the RISA interface.
-
-Load ownership is determined using the counts stored in:
-
-```text
-[BASIC_LOAD_CASES]
-```
-
-Specifically:
-
-- Distributed Load Count
-- Area Load Count
-- Node Load Count
-
-The parser walks the load tables sequentially and assigns rows back to the correct Basic Load Case using those counts.
-
-This behavior was validated against actual production RISA-3D models.
-
----
 
 ## Safety Notes
 
