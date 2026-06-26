@@ -45,12 +45,26 @@ For Claude Desktop integration, continue to the Installation section below.
 
 ```text
 risa3d-mcp-server/
-  index.js          # MCP server tools
-  risa-core.js      # Shared parsing helpers
-  risa-cli.js       # CLI testing/debugging
+  index.js
+  risa-core.js
+  risa-cli.js
   package.json
   README.md
+  CHANGELOG.md
   .gitignore
+
+  tests/
+    fixtures/
+      sample.r3d
+    output/
+    test-utils.js
+    parser.test.js
+    loads.test.js
+    qc.test.js
+    write-tools.test.js
+    geometry.test.js
+    run-tests.js
+    run-all.js
 ```
 
 ---
@@ -68,16 +82,19 @@ It can:
 - Run QA/QC checks on RISA models
 - Run CLI diagnostics without Claude/MCP
 
-Currently includes 25+ MCP tools covering:
+Currently includes 40+ MCP tools covering: model interrogation, QA/QC, load parsing, Excel/SAF export, model comparison, geometry editing, batch workflows, CLI diagnostics, and regression-tested parsing utilities.:
 
 - Model interrogation
 - QA/QC
-- Load parsing & Validation
-- Material takeoffs
-- SAF and Excel exports
-- Model comparison
-- Model cloning and editing
+- Load Parsing & Validation
+- Material Takeoffs
+- SAF and Excel Exports
+- Model Comparison
+- Model Cloning and Editing
 - CLI Debugging Toolkit
+- Geometry Editing
+- Batch Workflows
+- Regression-tested Parsing Utilities
 
 ---
 
@@ -364,6 +381,18 @@ revised: "C:\path\to\model-v2.r3d"
 | `find_duplicate_nodes` | Scans all nodes for pairs with nearly identical coordinates (default tolerance 0.001 ft, ~0.3mm). Duplicate nodes cause members to appear connected when they aren't, or produce zero-length members that silently corrupt analysis results. Flags pairs by label with exact distance and coordinates. |
 | `replace_section_size_in_folder` | Replaces a section size string across every `.r3d` file in a folder, saving each as a new file with a configurable suffix (never overwrites originals). Useful for applying a spec change across an entire project folder at once. Reports how many replacements were made per file, and skips files with no matches. |
 | `compare_risa_models` | Diffs two `.r3d` files and reports exactly what changed: nodes added, removed, or moved; members added, removed, or changed (size, type, or connectivity); section sets added, removed, or resized; and load combination count changes. Useful for tracking design iterations and documenting changes between submittals. |
+| `batch_replace_section_size` | Applies multiple section size replacements in one model and saves a new `.r3d` file. |
+| `batch_qc_folder` | Runs QC checks across every `.r3d` file in a folder and writes one Excel summary. |
+| `export_load_summary_to_excel` | Exports load summaries to Excel with separate sheets for Summary, Distributed Loads, Area Loads, and Node Loads. |
+| `move_node` | Moves an existing node by updating its coordinates and saving a new `.r3d` file. |
+| `delete_member` | Deletes one or more members by label and saves a new `.r3d` file. |
+| `find_connected_members` | Given a member label, lists all members connected at its i-node and j-node. |
+| `get_member_connectivity_at_node` | Given a node label, lists every member connected to that node. |
+| `copy_member` | Copies an existing member’s full field structure and reconnects it between two existing nodes. |
+| `split_member` | Splits one member into two by inserting a new node along its length. |
+| `merge_members` | Merges two compatible members that share one common node into one member. |
+| `mirror_geometry` | Mirrors selected members by creating mirrored copies and reusing or creating nodes as needed. |
+| `copy_translate_geometry` | Copies selected members and translates the copied geometry by X/Y/Z offsets. |
 
 ---
 
@@ -551,6 +580,18 @@ node --check risa-cli.js
 
 ---
 
+## Regression Tests
+
+This project includes a modular regression test suite to protect the parser and write helpers from breaking during future development.
+
+Run the full suite:
+
+```cmd
+node tests\run-all.js
+```
+
+---
+
 ## Recommended GitHub Files
 
 Do commit:
@@ -560,7 +601,18 @@ index.js
 risa-core.js
 risa-cli.js
 package.json
+package-lock.json
 README.md
+CHANGELOG.md
+.gitignore
+tests/test-utils.js
+tests/parser.test.js
+tests/loads.test.js
+tests/qc.test.js
+tests/write-tools.test.js
+tests/geometry.test.js
+tests/run-tests.js
+tests/run-all.js
 ```
 
 Do not commit:
@@ -637,6 +689,20 @@ Label, Type (e.g. "Wide Flange", "Tube", "Channel", "None"), Size (e.g. "W14X22"
 - [x] Standalone CLI mode for parser testing
 - [x] Load ownership resolution using Basic Load Case counts
 - [x] Node load editing in cloned models
+- [x] Batch replace multiple section sizes in one model
+- [x] Batch QC folder export to Excel
+- [x] Export load summaries to Excel
+- [x] Move existing nodes
+- [x] Delete members
+- [x] Find connected members
+- [x] Get member connectivity at a node
+- [x] Copy members between existing nodes
+- [x] Split members
+- [x] Merge compatible members
+- [x] Mirror selected geometry
+- [x] Copy/translate selected geometry
+- [x] Shared geometry editing helpers in `risa-core.js`
+- [x] Modular regression test suite
 
 ---
 
