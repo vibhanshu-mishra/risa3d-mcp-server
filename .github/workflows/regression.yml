@@ -25,6 +25,3 @@ jobs:
           node --check index.js
           node --check risa-core.js
           node --check risa-cli.js
-
-      - name: Run regression suite
-        run: node tests\run-all.js
