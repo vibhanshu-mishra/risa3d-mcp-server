@@ -11,9 +11,4 @@
     "xlsx": "^0.18.5",
     "zod": "^3.0.0"
   }
-  {
-  "name": "risa3d-mcp-server",
-  "version": "2.1.0",
-  "license": "MIT"
-   }
 }
