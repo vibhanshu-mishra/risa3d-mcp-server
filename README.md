@@ -1,6 +1,6 @@
 # RISA-3D MCP Server + CLI Toolkit
 
-> Connect Claude AI to your RISA-3D structural models using the Model Context Protocol (MCP).
+> Connect Claude/ChatGPT to your RISA-3D structural models using the Model Context Protocol (MCP).
 
 Built by a structural engineer to bring AI-assisted workflows to RISA-3D. This MCP server lets you talk to your `.r3d` files in plain English, no coding required after setup.
 
