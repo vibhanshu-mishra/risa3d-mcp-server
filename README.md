@@ -29,7 +29,7 @@ RISA-3D has no public API.
 
 This project bridges that gap by treating `.r3d` files as the interface, allowing AI assistants to inspect, compare, modify, and report on structural models without automating the RISA application itself.
 
-The goal is to augment structural engineers—not replace engineering judgment.
+The goal is to augment structural engineers, not replace engineering judgment.
 
 ---
 
