@@ -24,4 +24,5 @@ jobs:
         uses: openqodex/openqodex@v0
         with:
           review: off
+          upload-sarif: 'false'
           fail-on-tool-error: true
