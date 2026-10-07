@@ -1,0 +1,27 @@
+
+name: OpenQodex Code Review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  scan:
+    name: Security and Code Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Scan changed code
+        uses: openqodex/openqodex@v0
+        with:
+          review: off
+          fail-on-tool-error: true
