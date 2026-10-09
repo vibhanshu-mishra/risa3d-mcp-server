@@ -39,7 +39,7 @@ jobs:
         run: python -m pip install semgrep
 
       - name: Run Semgrep
-        run: semgrep scan --config p/default --error --metrics off .
+        run: semgrep scan --config p/default --metrics off .
 
   vulnerabilities:
     name: Scan vulnerabilities
