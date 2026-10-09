@@ -1,0 +1,92 @@
+name: Code Quality and Workflow Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least-privilege default. No secret or SARIF-upload permissions needed.
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    name: Ruff - Python lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Ruff
+        run: python -m pip install ruff==0.16.10
+      - name: Report Python findings (do not block yet)
+        run: ruff check --output-format github --exit-zero .
+
+  zizmor:
+    name: Zizmor - workflow security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Report GitHub Actions security findings (do not block yet)
+        run: uvx 'zizmor@1.30.1' --offline --format=github --no-exit-codes .
+
+  actionlint:
+    name: actionlint - workflow correctness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download and verify actionlint v1.7.12
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/actionlint-bin"
+      - name: Report workflow syntax findings (do not block yet)
+        continue-on-error: true
+        shell: bash
+        run: '"$RUNNER_TEMP/actionlint-bin/actionlint" -oneline'
+
+  eslint:
+    name: ESLint - JS/TS lint (npm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # Set to the folder containing package.json, e.g. 'frontend' or 'napi'.
+      JS_DIR: '.'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Report JS/TS findings (do not block yet)
+        continue-on-error: true
+        shell: bash
+        run: |
+          cd "$JS_DIR"
+          if [[ ! -f package-lock.json || ! -f eslint.config.mjs ]]; then
+            echo 'ESLint skipped: this folder needs package-lock.json and eslint.config.mjs.'
+            exit 0
+          fi
+          npm ci --ignore-scripts
+          npx --no-install eslint .
