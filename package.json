@@ -9,6 +9,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
-    "zod": "^3.0.0"
+    "zod": "^4.6.5"
   }
 }
