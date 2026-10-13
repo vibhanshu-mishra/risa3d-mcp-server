@@ -11,27 +11,41 @@ permissions:
   contents: read
 
 jobs:
+  # ==========================================
+  # 1. Scan for leaked secrets (Gitleaks)
+  # ==========================================
   secrets:
     name: Scan for leaked secrets
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Gitleaks
+      - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           GITLEAKS_ENABLE_COMMENTS: "false"
 
+  # ==========================================
+  # 2. Find insecure code (Semgrep)
+  # ==========================================
   code-security:
     name: Find insecure code
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -41,15 +55,20 @@ jobs:
       - name: Run Semgrep
         run: semgrep scan --config p/default --metrics off .
 
+  # ==========================================
+  # 3. Scan vulnerabilities (Trivy)
+  # ==========================================
   vulnerabilities:
     name: Scan vulnerabilities
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Trivy
+      - name: Run Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
